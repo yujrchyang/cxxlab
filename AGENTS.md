@@ -11,6 +11,8 @@
 
 - **先读 Ceph，再写代码**：每步开发前必须分析 Ceph reference (`/home/yujrchyang/opensrc/ceph/`) 中对应模块的完整实现（.h + .cc），理解完整逻辑、数据结构、边界条件后再开始编码。禁止仅凭设计文档或记忆实现。
 - **新源码文件名必须小写**：所有新增源码文件（`.h`/`.cc`）使用全小写字母命名（如 `bluefs.h`/`bluefs.cc`），禁止大写字母。
+- **Markdown 必须通过 markdownlint**：每次创建或修改 `.md` 文件后，必须运行 `markdownlint <file>` 检查语法并修复全部告警，通过后才算完成。
+- **ASCII 框线图内部保持纯英文**：`┌─┐`/`│ │`/`└─┘` 这类**闭合框线图**（有横向边框包围的对齐区域），框内内容只能用 ASCII 字符（英文/数字/符号）；中文字形在等宽字体中占 2 列，会导致框线错位。框外的中文标注/图例可自由使用。`│├└─` 纵向缩进流程树不在此列（连接符全为 ASCII 单宽，中文作为节点内容不影响对齐）。闭合框内必须含中文时改用 Markdown 列表/缩进格式表达，不使用 Mermaid/SVG 等替代方案。
 
 ## Headers
 
@@ -19,7 +21,7 @@
 the sort priority:
 
 | Priority | Pattern | Example headers |
-|----------|---------|-----------------|
+| ---------- | --------- | ----------------- |
 | 1 | `<` + `.h` | `<fcntl.h>`, `<unistd.h>`, `<gtest/gtest.h>`, `<libaio.h>` |
 | 2 | `<` + no `.h` or `.hpp` | `<vector>`, `<cstdlib>`, `<memory>` |
 | 3 | `<` + `.hpp` | `<boost/container/small_vector.hpp>` |
@@ -32,9 +34,11 @@ never migrate across blank lines.
 ## Progress
 
 ### Goal
+
 Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, modeled after Ceph's `src/os/bluestore/*`, layered on top of existing kv/ (RocksDBStore) and bluestore/ (FreelistManager + Allocator) infrastructure.
 
 ### Key Context
+
 - `TOPNSPC` macro defined in `common/common_fwd.h` → expands to `cxxlab`
 - `bufferlist` = `cxxlab::bufferlist`
 - Key encoding: `prefix + '\0' + inner_key` (both backends, Ceph-compatible)
@@ -52,6 +56,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - **自定义复合类型**（onode_t、extent_map 等复杂的 BlueStore 结构化数据）：用 `WRITE_CLASS_DENC(T)` 宏或 `DENC(Type, v, p)` 宏实现成员级序列化，在 `topnspc` 命名空间内使用
 
 用法示例：
+
 ```cpp
 #include "common/denc.h"
 
@@ -84,6 +89,7 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 简单原则：**只有 uint64/int/string 等简单字段时直接手动序列化；出现嵌套结构体组合（onode_t 含多个成员 + map + vector）时上 DENC**。
 
 ### Done
+
 - **RocksDBStore implementation:**
   - `RDBTransactionImpl`: builds `rocksdb::WriteBatch`, submitted via `db_->Write()` / `db_->Write({.sync=true})`
   - `RDBWholeSpaceIteratorImpl`: wraps `rocksdb::Iterator`, supports `ITERATOR_NOCACHE` via `fill_cache=false`, applies bounds from `WholeSpaceIteratorImpl::iterate_{lower,upper}_bound_` as `rocksdb::Slice*`
@@ -118,7 +124,7 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
   - `AvlAllocator`: interval-tree (AVL) based via `range_seg_tree_t`, exact match allocation, `_spillover_range()` cap mechanism
   - `BitmapAllocator`: 2-level bitmap (`bdev_block_count` × `bitmap_granularity`), `ffs`/`ffz` scan, affinity hint via arena-weighted round-robin
   - `HybridAllocator`: wraps AvlAllocator + BitmapAllocator child, `_add_to_tree()` override to claim-free adjacent extents from bitmap before AVL insert
-   - `Allocator::create()` factory with `"stupid"` (AvlAllocator), `"bitmap"`, `"hybrid"` type strings
+  - `Allocator::create()` factory with `"stupid"` (AvlAllocator), `"bitmap"`, `"hybrid"` type strings
 - **Tests:** 21 AvlAllocator tests, 33 BitmapAllocator tests, 19 HybridAllocator tests — all pass
 - **BlueFS Phase 1.1–1.9 (data structures through space allocation):** 33 tests total
   - `bluefs_types.h`: `bluefs_super_t`, `bluefs_fnode_t`, `bluefs_transaction_t`, `bluefs_extent_t` with DENC serialization
@@ -154,6 +160,7 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
   - 29 tests covering all operations, all pass
 
 ### Key Decisions
+
 - Single default ColumnFamily (no hash sharding, no `parse_sharding_def`)
 - `set_merge_operator` must be called before `open()` / `create_and_open()` for RocksDBStore
 - `close()` null-checks `db_` before delete, sets to `nullptr`, resets adapter
@@ -182,8 +189,9 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 开发顺序 **BlueFS → BlueRocksEnv → BlueStore**，详见 `docs/plan.md`。
 
 #### Phase 1: BlueFS (11 steps)
+
 | # | Step | Test Strategy | Status |
-|---|------|---------------|--------|
+| --- | ------ | --------------- | -------- |
 | 1.1 | `bluefs_types` — 数据结构 + DENC | encode/decode roundtrip | ✅ |
 | 1.2 | BlueFSConfig + RocksDBBlueFSVolumeSelector | 逻辑测试，无 IO | ✅ |
 | 1.3 | 设备层 + 超级块 (add_block_device, _write_super) | tempfile 读写 | ✅ |
@@ -192,13 +200,14 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 | 1.6 | 文件创建/关闭 (open_for_write/read, close_writer/reader) | 文件生命周期 | ✅ |
 | 1.7 | 文件读写 (append_try_flush, read, read_random, fsync) | 写入→读回验证 | ✅ |
 | 1.8 | 日志持久化 (dirty tracking, flush_and_sync_log) | 写→umount→mount→验证 | ✅ |
-| 1.9 | 空间分配 (_allocate, 设备回退, shared_alloc) | 多设备分配 | ✅ |
+| 1.9 | 空间分配 (_allocate, 设备回退，shared_alloc) | 多设备分配 | ✅ |
 | 1.10 | 异步压缩 (_compact_log_async) | 增长→压缩→验证 | ✅ |
 | 1.11 | 文件管理 (truncate, unlink, rename, stat) + 边界 | 错误路径 | ✅ |
 
 #### Phase 2: BlueRocksEnv (7 steps)
+
 | # | Step | Test Strategy | Status |
-|---|------|---------------|--------|
+| --- | ------ | --------------- | -------- |
 | 2.1 | 辅助函数 (err_to_status, split) | 单元测试 | ✅ |
 | 2.2 | BlueRocksSequentialFile + NewSequentialFile | BlueFS 写入→Env 读取 | ✅ |
 | 2.3 | BlueRocksRandomAccessFile + NewRandomAccessFile | 随机读 + GetUniqueId | ✅ |
@@ -208,8 +217,9 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 | 2.7 | BlueRocksEnv 集成 + EnvMirror | 与 POSIX Env 双路验证 | ✅ |
 
 #### Phase 3: BlueStore (15 steps)
+
 | # | Step | Test Strategy |
-|---|------|---------------|
+| --- | ------ | --------------- |
 | 3.1 | bluestore_types (pextent_t, blob_t, onode_t, cnode_t) | DENC roundtrip |
 | 3.2 | BlueStoreConfig | struct init + file load |
 | 3.3 | Onode key 编码 (_key_encode/decode) | roundtrip + 排序 |
@@ -227,10 +237,12 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 | 3.15 | 集成测试 | 压力 + 持久化 + 边界 |
 
 ### Next Steps
+
 1. Phase 3.1: bluestore_types (bluestore_pextent_t, bluestore_blob_t, bluestore_onode_t, bluestore_cnode_t + DENC)
 2. Phase 3.2: BlueStoreConfig struct init + file load
 
 ### Relevant Files
+
 - `kv/key_value_db.h`: Abstract base (TransactionImpl, IteratorImpl, WholeSpaceIteratorImpl, PrefixIteratorImpl, KeyValueDB)
 - `kv/key_value_db.cc`: PrefixIteratorImpl, KeyValueDB factory/create
 - `kv/mem/mem_db.h` / `kv/mem/mem_db.cc`: MemDB backend

@@ -1,6 +1,8 @@
 # 开发计划
 
-开发顺序：**BlueFS → BlueRocksEnv → BlueStore**，每阶段按内部依赖细分子步骤，每步可独立测试。
+开发顺序：**BlueFS → BlueRocksEnv → BlueStore → BTier**，每阶段按内部依赖细分子步骤，每步可独立测试。
+
+> BTier 是独立的分层存储引擎，与 BlueStore 并行开发。详细设计见 [docs/design/btier.md](design/btier.md)。
 
 ---
 
@@ -313,7 +315,7 @@
 
 ## 依赖图概览
 
-```
+```plaintext
 阶段一: BlueFS
   1.1 bluefs_types ──────────────────────────────────────────────
   1.2 Config + VolumeSelector                                    │
@@ -352,4 +354,75 @@
   3.13 Zero + Remove + Attrs ◄─────────────────────────────────┤
   3.14 Collection List ◄───────────────────────────────────────┤
   3.15 集成测试 ◄──────────────────────────────────────────────┘
+```
+
+---
+
+## 阶段四：BTier（分层存储引擎）
+
+> BTier 是独立的块级分层存储引擎，不依赖 BlueStore/kv/RocksDB。详细设计见 [design/btier.md](design/btier.md)。
+> 开发顺序：**A (I/O 路径) → B (双层 + 评分) → C1 (迁移) → C2 (压缩 + 集成)**
+
+### 阶段 A：核心 I/O 路径
+
+| 步骤 | 文件 | 实现内容 | 依赖 |
+| --- | --- | --- | --- |
+| A1 | `btier/btier_types.h` | `Tier`、`DiskLocation`、`ExtentMetrics`、`ExtentHeader`(4KB+CRC)、`KeyLocation`、`IoOp` | common/denc.h |
+| A2 | `btier/config.h/cc` | `WeightSet`、`BtierConfig` + JSON load/save | nlohmann/json |
+| A3 | `btier/extent_map.h/cc` | `ExtentEntry`、`ExtentMap` 基础（单层 + 生命周期 + deferred-free） | A1 + blk/ |
+| A4 | `btier/extent_map.h/cc` | 多键 packing（`append_slot` + `mark_dead_slot` + `record_io` CAS） | A3 |
+| A5 | `btier/key_map.h/cc` | `KeyMap`（key→extent + 反向索引 + stride tracking） | A1 |
+| A6 | `btier/journal.h/cc` | `Journal`（WAL 事务 + checkpoint + recover + 循环缓冲区） | A1 + blk/ |
+| A7 | `btier/btier.h/cc` + CMake | `BtierEngine`（init/recover/put/get/del/sync/shutdown） | A1–A6 |
+
+### 阶段 B：双层分配 + 评分
+
+| 步骤 | 文件 | 实现内容 | 依赖 |
+| --- | --- | --- | --- |
+| B1 | `btier/extent_map.h/cc` | 双层分配（FAST→SLOW fallback）+ `fast_watermark()` | A7 |
+| B2 | `btier/scoring_engine.h/cc` | `ScoringEngine`（4D 公式 + 权重自适应） | A2 |
+| B3 | `btier/btier.cc` | 评分集成 + randomness refresh | B1 + B2 |
+
+### 阶段 C1：迁移
+
+| 步骤 | 文件 | 实现内容 | 依赖 |
+| --- | --- | --- | --- |
+| C1.1 | `btier/extent_map.h/cc` | `MigrationHandle` 协议（begin/commit/abort/check） | B3 |
+| C1.2 | `btier/migration_engine.h/cc` | `MigrationEngine`（migrate_tier + 后台线程 + main_loop） | C1.1 |
+| C1.3 | `btier/btier.cc` | 评分驱动迁移集成 | C1.2 |
+| C1.4 | `btier/btier_observer.h/cc` | 可观测性（spdlog + stats + trace） | C1.3 |
+
+### 阶段 C2：压缩 + 集成
+
+| 步骤 | 文件 | 实现内容 | 依赖 |
+| --- | --- | --- | --- |
+| C2.1 | `btier/migration_engine.h/cc` | `compact()`（copy live data + batch_update KeyMap + free old） | C1.4 |
+| C2.2 | `tests/btier/test_e2e.cc` | 端到端集成测试 | C2.1 |
+
+### 依赖图
+
+```plaintext
+阶段 A: I/O 路径
+  A1 btier_types.h ──────────────────────────────────────────
+  A2 config.h/cc ──── 无依赖（与 A1 并行）                    │
+  A3 extent_map 基础 ─── A1 + blk/                             │
+  A4 extent_map packing ─── A3                                 │
+  A5 key_map ─── A1                                           │
+  A6 journal ─── A1 + blk/                                    │
+  A7 btier + CMake + 测试 ─── A1–A6 ──────────────────────────┤
+
+阶段 B: 双层 + 评分
+  B1 extent_map 双层 ─── A7                                    │
+  B2 scoring_engine ─── A2                                    │
+  B3 评分集成 ─── B1 + B2 ────────────────────────────────────┤
+
+阶段 C1: 迁移
+  C1.1 MigrationHandle ─── B3                                  │
+  C1.2 migration_engine ─── C1.1                             │
+  C1.3 集成 ─── C1.2                                          │
+  C1.4 observer ─── C1.3 ─────────────────────────────────────┤
+
+阶段 C2: 压缩 + 集成
+  C2.1 compact() ─── C1.4                                      │
+  C2.2 端到端测试 ─── C2.1 ──────────────────────────────────┘
 ```
