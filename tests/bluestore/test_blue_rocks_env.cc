@@ -14,7 +14,7 @@
 
 #include "blk/kernel_device.h"
 #include "bluestore/blue_rocks_env.h"
-#include "bluestore/bluefs.h"
+#include "bluefs/bluefs.h"
 #include "common/cassert.h"
 #include "cxxlab_test.h"
 #include "rocksdb/env.h"

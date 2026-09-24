@@ -1,10 +1,6 @@
 add_library(bluestore SHARED
     freelist_manager.cc
     bitmap_freelist_manager.cc
-    bluefs.cc
-    bluefs_config.cc
-    bluefs_types.cc
-    bluefs_volume_selector.cc
     blue_rocks_env.cc
 )
 target_include_directories(bluestore PUBLIC
@@ -15,6 +11,7 @@ target_link_libraries(bluestore PUBLIC
     common
     kv
     blk
+    bluefs
 )
 target_link_libraries(bluestore PRIVATE
     RocksDB::RocksDB

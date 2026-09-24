@@ -668,10 +668,10 @@ BlueRocksEnv 是连接 BlueFS 和 RocksDB 的桥梁——它实现 `rocksdb::Env
 
 | 文件 | 角色 |
 | --- | --- |
-| `bluestore/bluefs.h` / `bluefs.cc` | `BlueFS` 主类实现 |
-| `bluestore/bluefs_types.h` / `bluefs_types.cc` | `bluefs_super_t`、`bluefs_fnode_t`、`bluefs_transaction_t`、`bluefs_extent_t` + DENC |
-| `bluestore/bluefs_config.h` / `bluefs_config.cc` | `BlueFSConfig` |
-| `bluestore/bluefs_volume_selector.h` / `bluefs_volume_selector.cc` | `BlueFSVolumeSelector` + `RocksDBBlueFSVolumeSelector` |
+| `bluefs/bluefs.h` / `bluefs.cc` | `BlueFS` 主类实现 |
+| `bluefs/bluefs_types.h` / `bluefs_types.cc` | `bluefs_super_t`、`bluefs_fnode_t`、`bluefs_transaction_t`、`bluefs_extent_t` + DENC |
+| `bluefs/bluefs_config.h` / `bluefs_config.cc` | `BlueFSConfig` |
+| `bluefs/bluefs_volume_selector.h` / `bluefs_volume_selector.cc` | `BlueFSVolumeSelector` + `RocksDBBlueFSVolumeSelector` |
 
 ## 9. 参考
 
@@ -683,7 +683,7 @@ BlueRocksEnv 是连接 BlueFS 和 RocksDB 的桥梁——它实现 `rocksdb::Env
 - 本项目 [docs/design/allocator.md](allocator.md): Allocator 设计
 - 本项目 [docs/design/blue-rocks-env.md](blue-rocks-env.md): BlueRocksEnv 设计
 - 本项目 [docs/design/bluestore.md](bluestore.md): BlueStore 设计
-- 本项目 `bluestore/bluefs.h`: BlueFS 主类
-- 本项目 `bluestore/bluefs_types.h`: 磁盘数据结构 + DENC
-- 本项目 `bluestore/bluefs_config.h`: BlueFSConfig
-- 本项目 `bluestore/bluefs_volume_selector.h`: 卷选择器
+- 本项目 `bluefs/bluefs.h`: BlueFS 主类
+- 本项目 `bluefs/bluefs_types.h`: 磁盘数据结构 + DENC
+- 本项目 `bluefs/bluefs_config.h`: BlueFSConfig
+- 本项目 `bluefs/bluefs_volume_selector.h`: 卷选择器

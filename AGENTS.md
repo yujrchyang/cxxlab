@@ -35,7 +35,7 @@ never migrate across blank lines.
 
 ### Goal
 
-Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, modeled after Ceph's `src/os/bluestore/*`, layered on top of existing kv/ (RocksDBStore) and bluestore/ (FreelistManager + Allocator) infrastructure.
+Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, modeled after Ceph's `src/os/bluestore/*`, layered on top of existing kv/ (RocksDBStore) and bluestore/ (FreelistManager + Allocator) infrastructure. BlueFS 已拆分为独立 `libbluefs.so`。
 
 ### Key Context
 
@@ -45,6 +45,8 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - RocksDB version: v7.10.2 (via submodule `third_party/rocksdb/`)
 - Ceph reference: `/home/yujrchyang/opensrc/ceph/src/kv/*` and `src/os/bluestore/*`
 - kv/ compiles as SHARED library (`libkv.so`), links `common` (PUBLIC) + `RocksDB::RocksDB` (PRIVATE)
+- bluefs/ compiles as SHARED library (`libbluefs.so`), links `common` (PUBLIC) + `blk` (PUBLIC), no kv/RocksDB
+- bluestore/ compiles as SHARED library (`libbluestore.so`), links `common` (PUBLIC) + `kv` (PUBLIC) + `blk` (PUBLIC) + `bluefs` (PUBLIC) + `RocksDB` (PRIVATE)
 - `kv/CMakeLists.txt` uses `-Wno-unused-parameter` due to RocksDB callback signatures
 
 ### Serialization: `common/denc.h` (DENC framework)
@@ -249,9 +251,16 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 - `kv/rocksdb/rocksdb_store.h` / `kv/rocksdb/rocksdb_store.cc`: RocksDBStore backend
 - `kv/merge_op/`: MergeOperator abstract base, Int64ArrayMergeOperator, XorMergeOperator
 - `kv/CMakeLists.txt`: builds libkv.so (SHARED), links common (PUBLIC) + RocksDB::RocksDB (PRIVATE), uses `-Wno-unused-parameter`
+- `bluefs/bluefs.h` / `bluefs/bluefs.cc`: BlueFS user-space filesystem
+- `bluefs/bluefs_types.h` / `bluefs/bluefs_types.cc`: bluefs_super_t, bluefs_fnode_t, bluefs_transaction_t, bluefs_extent_t, bluefs_shared_alloc_context_t
+- `bluefs/bluefs_config.h` / `bluefs/bluefs_config.cc`: BlueFSConfig struct
+- `bluefs/bluefs_volume_selector.h` / `bluefs/bluefs_volume_selector.cc`: BlueFSVolumeSelector + RocksDBBlueFSVolumeSelector
+- `bluefs/CMakeLists.txt`: builds libbluefs.so (SHARED), links common (PUBLIC) + blk (PUBLIC), no kv/RocksDB
 - `bluestore/freelist_manager.h`: FreelistManager abstract base
 - `bluestore/bitmap_freelist_manager.h` / `bluestore/bitmap_freelist_manager.cc`: BitmapFreelistManager implementation
-- `bluestore/CMakeLists.txt`: builds libbluestore.so (SHARED), links common (PUBLIC) + kv (PUBLIC) + blk (PUBLIC) + RocksDB (PRIVATE)
+- `bluestore/blue_rocks_env.h` / `bluestore/blue_rocks_env.cc`: BlueRocksEnv (rocksdb::Env adapter for BlueFS)
+- `bluestore/bluestore_types.h`: bluestore_pextent_t alias
+- `bluestore/CMakeLists.txt`: builds libbluestore.so (SHARED), links common (PUBLIC) + kv (PUBLIC) + blk (PUBLIC) + bluefs (PUBLIC) + RocksDB (PRIVATE)
 - `bluestore/allocator.h` / `bluestore/allocator.cc`: Allocator abstract base + factory
 - `bluestore/avl_allocator.h` / `bluestore/avl_allocator.cc`: AvlAllocator (interval-tree)
 - `bluestore/bitmap_allocator.h` / `bluestore/bitmap_allocator.cc`: BitmapAllocator (2-level bitmap)
@@ -259,7 +268,11 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 - `tests/kv/test_librocksdb.cc`: 23 raw RocksDB tests
 - `tests/kv/test_rocksdb.cc`: 21 RocksDBStore tests
 - `tests/kv/test_memdb.cc`: 36 MemDB tests
+- `tests/bluefs/test_bluefs_types.cc`: BlueFS types DENC roundtrip tests
+- `tests/bluefs/test_bluefs_volume_selector.cc`: VolumeSelector tests
+- `tests/bluefs/test_bluefs.cc`: BlueFS functional tests (55 tests)
 - `tests/bluestore/test_bitmap_freelist_manager.cc`: 15 BitmapFreelistManager tests
+- `tests/bluestore/test_blue_rocks_env.cc`: BlueRocksEnv tests (29 tests)
 - `tests/bluestore/test_avl_allocator.cc`: 21 AvlAllocator tests
 - `tests/bluestore/test_bitmap_allocator.cc`: 33 BitmapAllocator tests
 - `tests/bluestore/test_hybrid_allocator.cc`: 19 HybridAllocator tests

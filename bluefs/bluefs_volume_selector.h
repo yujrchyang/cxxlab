@@ -7,7 +7,7 @@
 #include <utility>
 #include <vector>
 
-#include "bluestore/bluefs_types.h"
+#include "bluefs/bluefs_types.h"
 
 namespace TOPNSPC {
 

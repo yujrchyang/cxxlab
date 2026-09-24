@@ -16,13 +16,19 @@
 │  │  bluestore/      │  │  btier/                         │  │
 │  └────────┬─────────┘  └─────────────┬───────────────────┘  │
 ├───────────┼──────────────────────────┼──────────────────────┤
-│           │     Infrastructure Layer │                      │
+│           │   Filesystem + KV Layer  │                      │
 │  ┌────────▼─────────┐  ┌─────────────▼──────────┐           │
-│  │  kv              │  │  blk (dev + alloc)     │           │
-│  │  kv/             │  │  blk/                  │           │
+│  │  bluefs          │  │  kv                     │           │
+│  │  bluefs/         │  │  kv/                    │           │
 │  └────────┬─────────┘  └────────────┬───────────┘           │
-│           │                         │                       │
+├───────────┼─────────────────────────┼───────────────────────┤
+│           │     Block + IO Layer    │                       │
 │  ┌────────▼─────────────────────────▼──────────┐            │
+│  │  blk (dev + alloc)                          │            │
+│  │  blk/                                       │            │
+│  └────────────────┬────────────────────────────┘            │
+│                   │                                         │
+│  ┌────────────────▼────────────────────────────┐            │
 │  │  common (bufferlist, denc, crc32, etc.)     │            │
 │  │  common/                                    │            │
 │  └─────────────────────────────────────────────┘            │
@@ -45,9 +51,13 @@ common  ← 基础库 (bufferlist, denc, crc32, uuid, intarith, ...)
   │     ├── MemDB (调试后端)
   │     └── MergeOperator (XOR / Int64Array)
   │
-  ├── bluestore  ← BlueStore 引擎 (含 BlueFS + BlueRocksEnv)
+  ├── bluefs  ← 用户态文件系统 (独立库)
+  │     ├── BlueFS (mkfs/mount/dir/file/journal)
+  │     ├── bluefs_types / bluefs_config / bluefs_volume_selector
+  │     └── 无 kv/RocksDB 依赖，可独立复用
+  │
+  ├── bluestore  ← BlueStore 引擎 (含 FM + BlueRocksEnv)
   │     ├── FreelistManager / BitmapFreelistManager
-  │     ├── BlueFS (用户态文件系统)
   │     ├── BlueRocksEnv (rocksdb::Env 适配)
   │     └── bluestore_types (pextent, blob, onode, cnode)
   │
@@ -65,14 +75,17 @@ common  ← 基础库 (bufferlist, denc, crc32, uuid, intarith, ...)
 | `common` | — | — | libcommon.so |
 | `blk` | common, aio | — | libblk.so |
 | `kv` | common | RocksDB | libkv.so |
-| `bluestore` | common, kv, blk | RocksDB | libbluestore.so |
+| `bluefs` | common, blk | — | libbluefs.so |
+| `bluestore` | common, kv, blk, bluefs | RocksDB | libbluestore.so |
 | `btier` | common, blk | — | libbtier.so |
 
-> bluestore 不依赖 btier，btier 不依赖 bluestore/kv。两者是平行的存储引擎。
+> bluefs 独立于 kv/RocksDB，任何基于 RocksDB 的应用可单独链接 libbluefs.so 获得用户态文件系统支撑。
+>
+> bluestore 不依赖 btier，btier 不依赖 bluestore/kv/bluefs。两者是平行的存储引擎。
 >
 > RocksDB 依赖说明： `kv` 和 `bluestore` 库均将 RocksDB 设为 PRIVATE。`kv` 仅 `RocksDBStore` 实现内部使用 RocksDB。`bluestore` 仅 `BlueRocksEnv` 实现内部使用 RocksDB，CMake 链接层面将 `RocksDB::RocksDB` 设为 PRIVATE，不向下游 target 传递链接依赖；但 `blue_rocks_env.h` 公开继承 `rocksdb::EnvWrapper` 并直接引入 RocksDB 头文件，头文件层面仍暴露 RocksDB 类型。
 >
-> FreelistManager → blk 依赖：FreelistManager 编译在 `bluestore` 动态库中，通过 `bluestore` PUBLIC 链接 `blk` 获取 Allocator 接口和 `pextent_t`/`interval_set` 类型（`blk/extent_types.h`）。
+> FreelistManager 保留在 `bluestore` 库中（不迁入 `blk`），因为其实现本质是 KV 操作（bitmap XOR merge），属于引擎级持久化策略而非块设备原语。
 
 ## 3. 模块职责
 
@@ -81,7 +94,8 @@ common  ← 基础库 (bufferlist, denc, crc32, uuid, intarith, ...)
 | common | bufferlist、DENC 序列化、CRC32、UUID、工具函数 | [common.md](common.md) |
 | blk | 块设备抽象 (KernelDevice + libaio)、空间分配器 (Avl/Bitmap/Hybrid) | [block-device.md](block-device.md)、[allocator.md](allocator.md) |
 | kv | KV 存储抽象层 (RocksDBStore + MemDB)、MergeOperator | [keyvalue-db.md](keyvalue-db.md) |
-| bluestore | FreelistManager、BlueFS、BlueRocksEnv、BlueStore 类型定义 | [freelist-manager.md](freelist-manager.md)、[bluefs.md](bluefs.md)、[blue-rocks-env.md](blue-rocks-env.md)、[bluestore.md](bluestore.md) |
+| bluefs | 用户态文件系统（mkfs/mount/dir/file/journal/log compaction） | [bluefs.md](bluefs.md) |
+| bluestore | FreelistManager、BlueRocksEnv、BlueStore 类型定义与引擎 | [freelist-manager.md](freelist-manager.md)、[blue-rocks-env.md](blue-rocks-env.md)、[bluestore.md](bluestore.md) |
 | btier | 分层存储引擎 (评分、迁移、压缩、WAL) | [btier.md](btier.md) |
 
 ## 4. KV 前缀定义
@@ -177,20 +191,34 @@ BTier:      bdev->open() → alloc->create() → Journal::recover()
 | ADR-07 | BlueFS 使用 AvlAllocator 而非 BitmapAllocator | 已采纳 | [bluefs.md](bluefs.md) §7.2 |
 | ADR-08 | Allocator 从 `bluestore/` 迁移到 `blk/`（Phase 0 重构） | 已采纳 | [allocator.md](allocator.md) §5.4 |
 | ADR-09 | 不引入统一存储引擎抽象接口 | 已采纳 | — |
-| ADR-10 | BlueFS 编译在 `bluestore` 动态库中，不拆为独立 `.so` | 已采纳 | 见下方 §9 库边界决策 |
+| ADR-10 | BlueFS 拆为独立 `libbluefs.so`，与 `libbluestore.so` 分离 | 已修订 | 见下方 §9 库边界决策 |
 | ADR-11 | `bluestore` 将 RocksDB 设为 PRIVATE 依赖 | 已采纳 | 见下方 §9 库边界决策 |
+| ADR-12 | FreelistManager 保留在 `libbluestore.so`，不迁入 `blk/` | 已采纳 | 见下方 §9 库边界决策 |
 
 ## 9. 库边界决策
 
-### 9.1 BlueFS 未拆为独立 `.so` (ADR-10)
+### 9.1 BlueFS 拆为独立 `libbluefs.so` (ADR-10)
 
-BlueFS、BlueRocksEnv、FreelistManager 三个子系统编译在 `libbluestore.so`（SHARED）中。未拆分的原因：
+BlueFS 从 `libbluestore.so` 中拆出为独立的 `libbluefs.so`（SHARED）。BlueRocksEnv 和 FreelistManager 保留在 `libbluestore.so` 中。
 
-- BlueFS 与 BlueStore 共享 Allocator（`bluefs_shared_alloc_context_t`），拆分后需跨库传递 Allocator 指针，增加接口复杂度
-- BlueRocksEnv 依赖 BlueFS，BlueStore 依赖两者，当前为紧耦合的单一部署单元
-- 动态库（`.so`）便于与其他模块统一链接，避免静态库的符号重复问题
+拆分理由：
 
-未来拆分触发条件：若 BTier 或其他引擎需要复用 BlueFS（例如将 BTier journal 放在 BlueFS 上），应将 BlueFS 拆为独立 `libbluefs.so`，BlueStore 和 BTier 分别链接。
+- BlueFS 对 kv/RocksDB **零依赖**，是真正独立的子系统
+- 独立 `.so` 允许任何基于 RocksDB 的应用复用 BlueFS 作为用户态存储后端
+- `bluefs_shared_alloc_context_t` 跨库传递 Allocator 指针，接口不变（通过 `add_block_device()` 参数）
+- BTier 等引擎未来可复用 BlueFS（例如将 journal 放在 BlueFS 上）
+
+BlueRocksEnv 保留在 `libbluestore.so` 的原因：
+
+- 它是 BlueStore 的消费者（为 BlueStore 提供 `rocksdb::Env` 适配），不是 BlueFS 的消费者
+- 它依赖 `rocksdb/env.h`，合入 `libbluefs.so` 会让 BlueFS 被迫依赖 RocksDB 头文件
+- 代码量小（~200 行），不值得独立为第三个 `.so`
+
+FreelistManager 保留在 `libbluestore.so` 的原因（ADR-12）：
+
+- 其实现本质是 KV 操作（bitmap XOR merge、enumerate 扫描），属于引擎级持久化策略
+- 迁入 `blk/` 会让 `libblk.so` 从纯 IO 原语层变为需要 kv 依赖的重量级库
+- BTier 不使用 FreelistManager（通过 Journal 恢复分配状态），印证 FM 是引擎级而非设备级关注点
 
 ### 9.2 RocksDB 依赖隔离 (ADR-11)
 

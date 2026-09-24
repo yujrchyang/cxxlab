@@ -203,6 +203,7 @@ echo "/usr/lib/cxxlab" > %{buildroot}%{_sysconfdir}/ld.so.conf.d/cxxlab.conf
 %{_libdir}/cxxlab/libcommon.so
 %{_libdir}/cxxlab/libkv.so
 %{_libdir}/cxxlab/libblk.so
+%{_libdir}/cxxlab/libbluefs.so
 %{_libdir}/cxxlab/libbluestore.so
 %{_libdir}/cxxlab/libbtier.so
 %{_bindir}/cxxlab-demo
@@ -248,6 +249,7 @@ rpmbuild -bb cxxlab.spec
 │   │   ├── libcommon.so                 # 公共工具库（使用 spdlog）
 │   │   ├── libkv.so                     # KV 抽象层（使用 RocksDB）
 │   │   ├── libblk.so                    # 块设备抽象层
+│   │   ├── libbluefs.so                 # BlueFS 用户态文件系统
 │   │   ├── libbluestore.so              # BlueStore 引擎（Phase 3）
 │   │   └── libbtier.so                  # B-Tier 引擎
 │   │
@@ -286,7 +288,7 @@ set(CMAKE_BUILD_WITH_INSTALL_RPATH ON)
 set(CMAKE_INSTALL_RPATH_USE_LINK_PATH OFF)
 
 # 对使用第三方库的目标设置
-set_target_properties(kv bluestore btier PROPERTIES
+set_target_properties(kv bluefs bluestore btier PROPERTIES
     INSTALL_RPATH "/usr/lib/cxxlab-thirdparty"
 )
 ```

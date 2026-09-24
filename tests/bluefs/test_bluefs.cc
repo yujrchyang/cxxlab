@@ -17,7 +17,7 @@
 
 #include "blk/block_device.h"
 #include "blk/kernel_device.h"
-#include "bluestore/bluefs.h"
+#include "bluefs/bluefs.h"
 #include "cxxlab_test.h"
 
 using namespace TOPNSPC;

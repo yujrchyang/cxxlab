@@ -13,9 +13,9 @@
 #include "blk/allocator.h"
 #include "blk/block_device.h"
 #include "blk/io_context.h"
-#include "bluestore/bluefs_config.h"
-#include "bluestore/bluefs_types.h"
-#include "bluestore/bluefs_volume_selector.h"
+#include "bluefs/bluefs_config.h"
+#include "bluefs/bluefs_types.h"
+#include "bluefs/bluefs_volume_selector.h"
 #include "common/buffer.h"
 #include "common/common_fwd.h"
 

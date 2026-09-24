@@ -6,7 +6,7 @@
 #include <string_view>
 #include <utility>
 
-#include "bluestore/bluefs.h"
+#include "bluefs/bluefs.h"
 #include "common/cassert.h"
 #include "rocksdb/env.h"
 

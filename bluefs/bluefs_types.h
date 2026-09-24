@@ -6,7 +6,7 @@
 #include <string_view>
 #include <vector>
 
-#include "bluestore/bluestore_types.h"
+#include "blk/extent_types.h"
 #include "common/denc.h"
 #include "common/uuid.h"
 

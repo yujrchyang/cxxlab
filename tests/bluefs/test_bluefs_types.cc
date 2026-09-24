@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <vector>
 
-#include "bluestore/bluefs_types.h"
+#include "bluefs/bluefs_types.h"
 #include "common/denc.h"
 
 using namespace TOPNSPC;

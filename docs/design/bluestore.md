@@ -29,7 +29,7 @@ BlueStore 是一个直接管理原始块设备的单机键值存储引擎，绕�
 | `FreelistManager` | 分配状态持久化 | `bluestore/bitmap_freelist_manager.h` | 已实现 |
 | `Allocator` | 运行时内存分配决策 | `blk/{avl,bitmap,hybrid}_allocator.h` | 已实现 |
 | `BlockDevice` | 块设备读写 | `blk/kernel_device.h` (libaio) | 已实现 |
-| `BlueFS` | BlueStore 内部日志与元数据文件系统 | `bluestore/bluefs.h` | 已实现 |
+| `BlueFS` | BlueStore 内部日志与元数据文件系统 | `bluefs/bluefs.h` | 已实现 |
 | `BlueRocksEnv` | RocksDB 文件操作适配 BlueFS | `bluestore/blue_rocks_env.h` | 已实现 |
 
 ### 1.3 约束条件

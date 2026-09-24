@@ -13,5 +13,6 @@ target_include_directories(cxxlab_test_helpers INTERFACE
 add_subdirectory(common)
 add_subdirectory(blk)
 add_subdirectory(kv)
+add_subdirectory(bluefs)
 add_subdirectory(bluestore)
 add_subdirectory(btier)

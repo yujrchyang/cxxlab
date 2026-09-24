@@ -52,6 +52,9 @@ add_subdirectory(blk)
 # --- KV storage library ---
 add_subdirectory(kv)
 
+# --- BlueFS user-space filesystem ---
+add_subdirectory(bluefs)
+
 # --- BlueStore library ---
 add_subdirectory(bluestore)
 
