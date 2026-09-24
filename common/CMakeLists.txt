@@ -9,6 +9,7 @@ add_library(common SHARED
     logger.cc
     safe_io.cc
     spinlock.cc
+    throttle.cc
 )
 target_include_directories(common PUBLIC
     ${CMAKE_CURRENT_SOURCE_DIR}

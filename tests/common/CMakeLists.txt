@@ -181,3 +181,12 @@ target_link_libraries(test_interval_set
         GTest::gtest_main
 )
 add_test(NAME test_interval_set COMMAND test_interval_set)
+
+add_executable(test_throttle test_throttle.cc)
+target_include_directories(test_throttle PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_throttle
+    PRIVATE
+        common
+        GTest::gtest_main
+)
+add_test(NAME test_throttle COMMAND test_throttle)
