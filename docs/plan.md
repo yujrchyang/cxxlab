@@ -1,6 +1,6 @@
 # 开发计划
 
-开发顺序：**BlueFS → BlueRocksEnv → BlueStore → BTier**，每阶段按内部依赖细分子步骤，每步可独立测试。
+开发顺序：BlueFS → BlueRocksEnv → Throttle → BlueStore → BTier，每阶段按内部依赖细分子步骤，每步可独立测试。
 
 > BTier 是独立的分层存储引擎，与 BlueStore 并行开发。详细设计见 [docs/design/btier.md](design/btier.md)。
 
@@ -15,7 +15,7 @@
 | `bluefs_types.h/cc` | `bluefs_extent_t`、`bluefs_fnode_t`、`bluefs_super_t`、`bluefs_transaction_t` + DENC 序列化 |
 
 - 纯数据结构，无外部依赖
-- **测试**: DENC encode/decode roundtrip，验证 `fnode_t::make_delta()` / `append_extent()` / `recalc_allocated()`
+- 测试: DENC encode/decode roundtrip，验证 `fnode_t::make_delta()` / `append_extent()` / `recalc_allocated()`
 
 ### 1.2 BlueFSConfig + VolumeSelector
 
@@ -25,7 +25,7 @@
 | `bluefs_volume_selector.h/cc` | `BlueFSVolumeSelector` 抽象基类 + `RocksDBBlueFSVolumeSelector` 实现 |
 
 - 逻辑层，无需块设备
-- **测试**: 构造不同容量组合，验证 `select_prefer_bdev()` 在 DB 满时正确 spill 到 Slow/WAL
+- 测试: 构造不同容量组合，验证 `select_prefer_bdev()` 在 DB 满时正确 spill 到 Slow/WAL
 
 ### 1.3 设备层 + 超级块
 
@@ -34,7 +34,7 @@
 | `BlueFS.h/cc` | `add_block_device()`、`add_shared_device()`、`_init_alloc()`、`_write_super()`、`_open_super()` |
 
 - 依赖: Allocator（已完成）、BlockDevice（已完成）
-- **测试**: 在临时文件上写超级块、读回验证 CRC32
+- 测试: 在临时文件上写超级块、读回验证 CRC32
 
 ### 1.4 mkfs + mount（核心框架）
 
@@ -43,7 +43,7 @@
 | `BlueFS.h/cc` | `mkfs()`、`mount()`、`umount()`，日志重放逻辑 `_replay()` |
 
 - 依赖: 1.3
-- **测试**: mkfs → mount → umount，验证 log 文件 ino=1 正确创建、OP_INIT 可重放
+- 测试: mkfs → mount → umount，验证 log 文件 ino=1 正确创建、OP_INIT 可重放
 
 ### 1.5 目录操作
 
@@ -52,7 +52,7 @@
 | `BlueFS.h/cc` | `mkdir()`、`rmdir()`、`lookup()` |
 
 - 依赖: 1.4
-- **测试**: 创建目录 → 列出所有目录 → 删除 → 验证不存在
+- 测试: 创建目录 → 列出所有目录 → 删除 → 验证不存在
 
 ### 1.6 文件创建/关闭
 
@@ -61,7 +61,7 @@
 | `BlueFS.h/cc` | `open_for_write()`、`open_for_read()`、`close_writer()`、`close_reader()` |
 
 - 依赖: 1.5
-- **测试**: 创建文件 → 打开读句柄 → 关闭 → 验证 inode 正确
+- 测试: 创建文件 → 打开读句柄 → 关闭 → 验证 inode 正确
 
 ### 1.7 文件读写
 
@@ -70,7 +70,7 @@
 | `BlueFS.h/cc` | `append_try_flush()`、`_flush_F()`、`_flush_data()`、`flush()`、`fsync()`、`read()`、`read_random()` |
 
 - 依赖: 1.6 + BlockDevice AIO 接口
-- **测试**: 写入数据 → fsync → 读回比较 → 随机读验证
+- 测试: 写入数据 → fsync → 读回比较 → 随机读验证
 
 ### 1.8 日志持久化
 
@@ -79,7 +79,7 @@
 | `BlueFS.h/cc` | `_signal_dirty_to_log()`、`_flush_and_sync_log()`、`_consume_dirty()`、`_clear_dirty_set_stable()`、`_release_pending_allocations()` |
 
 - 依赖: 1.7
-- **测试**: 写入文件 → fsync → umount → mount → 验证文件内容和元数据恢复
+- 测试: 写入文件 → fsync → umount → mount → 验证文件内容和元数据恢复
 
 ### 1.9 空间分配
 
@@ -88,7 +88,7 @@
 | `BlueFS.h/cc` | `_allocate()`、`_maybe_extend_log()`、设备回退链 WAL→DB→Slow、shared_alloc 集成 |
 
 - 依赖: 1.8 + Allocator
-- **测试**: 分配耗尽 WAL → 验证自动回退到 DB；共享设备分配验证 `bluefs_used` 计数
+- 测试: 分配耗尽 WAL → 验证自动回退到 DB；共享设备分配验证 `bluefs_used` 计数
 
 ### 1.10 异步日志压缩
 
@@ -97,7 +97,7 @@
 | `BlueFS.h/cc` | `_compact_log_async()`、`_compact_log_dump_metadata()`、`_maybe_compact_log()` |
 
 - 依赖: 1.9
-- **测试**: 反复写入产生大量日志 → 触发压缩 → 验证压缩后日志可正确重放 → 旧空间已释放
+- 测试: 反复写入产生大量日志 → 触发压缩 → 验证压缩后日志可正确重放 → 旧空间已释放
 
 ### 1.11 文件管理 + 边界
 
@@ -106,7 +106,7 @@
 | `BlueFS.h/cc` | `truncate()`、`unlink()`、`rename()`、`stat()`、`get_total()`、`get_free()` |
 
 - 依赖: 1.8
-- **测试**: 文件创建 → 改名 → 查询 stat → 删除 → 边界情况（空文件、大文件、重名等）
+- 测试: 文件创建 → 改名 → 查询 stat → 删除 → 边界情况（空文件、大文件、重名等）
 
 ---
 
@@ -119,7 +119,7 @@
 | `BlueRocksEnv.h/cc` | `err_to_status()`、`split()` |
 
 - 无依赖
-- **测试**: 各种路径字符串解析、错误码转换
+- 测试: 各种路径字符串解析、错误码转换
 
 ### 2.2 SequentialFile
 
@@ -128,7 +128,7 @@
 | `BlueRocksEnv.h/cc` | `BlueRocksSequentialFile`（内部类）+ `NewSequentialFile()` |
 
 - 依赖: BlueFS 文件读接口
-- **测试**: 通过 BlueFS 写入文件 → 通过 Env `NewSequentialFile` + `Read()/Skip()` 读取 → 验证
+- 测试: 通过 BlueFS 写入文件 → 通过 Env `NewSequentialFile` + `Read()/Skip()` 读取 → 验证
 
 ### 2.3 RandomAccessFile
 
@@ -137,7 +137,7 @@
 | `BlueRocksEnv.h/cc` | `BlueRocksRandomAccessFile`（内部类）+ `NewRandomAccessFile()` |
 
 - 依赖: BlueFS `read_random()`
-- **测试**: 写入多块数据 → `Read(offset)` 随机位置读取 → `GetUniqueId()` 验证
+- 测试: 写入多块数据 → `Read(offset)` 随机位置读取 → `GetUniqueId()` 验证
 
 ### 2.4 WritableFile
 
@@ -146,7 +146,7 @@
 | `BlueRocksEnv.h/cc` | `BlueRocksWritableFile`（内部类）+ `NewWritableFile()`、`ReuseWritableFile()` |
 
 - 依赖: BlueFS 文件写接口
-- **测试**: `Append()` → `Sync()` → `Close()` → 通过 BlueFS 读回验证 → `GetFileSize()` 正确性
+- 测试: `Append()` → `Sync()` → `Close()` → 通过 BlueFS 读回验证 → `GetFileSize()` 正确性
 
 ### 2.5 目录 + 文件状态操作
 
@@ -155,7 +155,7 @@
 | `BlueRocksEnv.h/cc` | `NewDirectory()`、`FileExists()`、`GetChildren()`、`DeleteFile()`、`CreateDir()`、`DeleteDir()`、`GetFileSize()`、`RenameFile()`、`LockFile()`、`UnlockFile()` |
 
 - 依赖: BlueFS 目录操作
-- **测试**: 完整目录/文件生命周期：创建目录 → 创建文件 → 查询存在 → 获取子项 → 改名 → 删除
+- 测试: 完整目录/文件生命周期：创建目录 → 创建文件 → 查询存在 → 获取子项 → 改名 → 删除
 
 ### 2.6 Logger
 
@@ -164,7 +164,7 @@
 | `RocksDBStore.h/cc` 或独立文件 | `CephRocksdbLogger` + `NewLogger()` |
 
 - 无 BlueFS 依赖
-- **测试**: 构造 Logger，写入日志消息，验证输出
+- 测试: 构造 Logger，写入日志消息，验证输出
 
 ### 2.7 BlueRocksEnv 集成测试
 
@@ -173,143 +173,204 @@
 | `BlueRocksEnv.h/cc` | `BlueRocksEnv` 完整实现 + 路径分发逻辑（绝对路径逃逸） |
 
 - 依赖: 2.2–2.6
-- **测试**: 使用 `EnvMirror` 同时验证 BlueRocksEnv 与 POSIX Env 行为一致
+- 测试: 使用 `EnvMirror` 同时验证 BlueRocksEnv 与 POSIX Env 行为一致
+
+---
+
+## 阶段 2.5：Throttle 基础库
+
+### 2.5.1 Throttle 核心实现 [已完成]
+
+| 文件 | 内容 |
+| --- | --- |
+| `common/throttle.h/cc` | `Throttle` 类：`get()`、`get_or_fail()`、`try_get()`、`take()`、`put()`、`reset_max()`、`reset()` |
+
+- 无外部依赖，纯 std::mutex + std::condition_variable
+- 测试: 并发获取/释放、超时机制、上限保护、资源耗尽场景
+
+### 2.5.2 Throttle 集成验证 [已完成]
+
+| 文件 | 内容 |
+| --- | --- |
+| `tests/common/test_throttle.cc` | 多线程压测：100 线程并发获取、超时等待、资源释放 |
+
+- 依赖: 2.5.1
+- 测试: 高并发场景下无死锁、无资源泄漏、超时正确触发
 
 ---
 
 ## 阶段三：BlueStore 核心引擎
 
-### 3.1 bluestore_types（纯数据结构）
+> 功能裁剪：201 项 → 104 项 MVP (52%) + 41 项 P1 + 28 项 P2 + 28 项 Deferred
+> 详细分析见 [design/bluestore.md](design/bluestore.md) §8-§11
+
+### 3.1 bluestore_types（纯数据结构）[MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `bluestore_types.h/cc` | `bluestore_pextent_t`、`bluestore_blob_t`、`bluestore_onode_t`、`bluestore_cnode_t` + DENC 序列化 |
 
 - 无外部依赖
-- **测试**: 各类型 DENC encode/decode roundtrip，`blob_t::map()` / `verify_csum()` / `allocated()` / `split()`
+- 测试: 各类型 DENC encode/decode roundtrip，`blob_t::map()` / `verify_csum()` / `allocated()` / `split()`
 
-### 3.2 BlueStoreConfig
+### 3.2 BlueStoreConfig [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `bluestore_config.h` | `BlueStoreConfig` 结构体，默认值 + `load_from_file()` |
 
-### 3.3 Onode key 编码
+### 3.3 Onode key 编码 [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `BlueStore.h/cc` | `_key_encode_prefix()`、`_key_encode_object()`、`_key_decode_object()`、`append_escaped()` |
 
 - 依赖: 3.1
-- **测试**: encode/decode roundtrip，排序一致性验证
+- 测试: encode/decode roundtrip，排序一致性验证
 
-### 3.4 Blob 内存管理
+### 3.4 Blob 内存管理 [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `BlueStore.h/cc` | `Blob` 类、`bluestore_blob_use_tracker_t` |
 
 - 依赖: 3.1
-- **测试**: Blob 创建、`split()`、`get_ref()`/`put_ref()`、`used_in_blob` 引用追踪
+- 测试: Blob 创建、`split()`、`get_ref()`/`put_ref()`、`used_in_blob` 引用追踪
 
-### 3.5 ExtentMap
+### 3.5 ExtentMap [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `BlueStore.h/cc` | `ExtentMap`、`Extent`、`seek_lextent()`、`punch_hole()`、`add()`、`rm()`、`compress_extent_map()`、`needs_reshard()` |
 
 - 依赖: 3.4
-- **测试**: 插入 extent → 按偏移查找 → 打孔 → 删除 → 重新映射
+- 测试: 插入 extent → 按偏移查找 → 打孔 → 删除 → 重新映射
 
-### 3.6 Onode + Collection（内存 + KV）
+### 3.6 Onode + Collection（内存 + KV）[MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `BlueStore.h/cc` | `Onode`、`Collection`、`get_onode()`、`write_onode()` 到 KV、shard index 管理 |
 
 - 依赖: 3.3 + 3.5 + KV (RocksDBStore)
-- **测试**: Onode 编码 → KV 读写 → 解码验证 → shard 分片加载/保存
+- 测试: Onode 编码 → KV 读写 → 解码验证 → shard 分片加载/保存
 
-### 3.7 mkfs + mount
+### 3.7 mkfs + mount [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `BlueStore.h/cc` | `mkfs()`、`mount()`、`_open_db_and_around()`、`_open_collections()`、`_read_super_meta()` |
 
 - 依赖: 3.6 + FreelistManager + Allocator + BlockDevice + BlueFS（先 mount BlueFS）
-- **测试**: mkfs → mount → 验证超级块、collections、allocator 状态正确
+- 测试: mkfs → mount → 验证超级块、collections、allocator 状态正确
 
-### 3.8 TransContext + OpSequencer
+### 3.8 TransContext + OpSequencer [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `BlueStore.h/cc` | `TransContext` 状态机、`OpSequencer`、`queue_transactions()`、`_txc_state_proc()` |
 
 - 依赖: 3.7
-- **测试**: 创建 TransContext → 状态推进 → OpSequencer 顺序保证
+- 测试: 创建 TransContext → 状态推进 → OpSequencer 顺序保证
 
-### 3.9 Small Write 路径
+### 3.9 Small Write 路径 [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `BlueStore.h/cc` | `_do_write()`、`_choose_write_options()`、`_do_write_small()` |
 
 - 依赖: 3.8 + ExtentMap + Allocator
-- **测试**: 写入 1 个 AU 内数据 → 验证 extent 正确 → 覆盖已有 extent → 验证旧 extent 进入 released
+- 测试: 写入 1 个 AU 内数据 → 验证 extent 正确 → 覆盖已有 extent → 验证旧 extent 进入 released
 
-### 3.10 Big Write 路径
+### 3.10 Big Write 路径 [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `BlueStore.h/cc` | `_do_write_big()`、`_do_alloc_write()`、`_wctx_finish()` |
 
 - 依赖: 3.9
-- **测试**: 写入多 AU 对齐数据 → 验证 blob 的 physical extents → 校验和正确
+- 测试: 写入多 AU 对齐数据 → 验证 blob 的 physical extents → 校验和正确
 
-### 3.11 读取路径
+### 3.11 读取路径 [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `BlueStore.h/cc` | `_do_read()`、`_read_cache()`、`_prepare_read_ioc()`、`_generate_read_result_bl()` |
 
 - 依赖: 3.10 + ExtentMap fault_range + BlockDevice 读
-- **测试**: 写入 → 读取 → 比较数据 → 校验和验证 → 部分读取（offset/length 不对齐）
+- 测试: 写入 → 读取 → 比较数据 → 校验和验证 → 部分读取（offset/length 不对齐）
 
-### 3.12 KV 提交管道
+### 3.12 KV 提交管道 [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `BlueStore.h/cc` | `_txc_write_nodes()`、`_txc_finalize_kv()`、`kv_sync_thread()`、`kv_finalize_thread()`、`_txc_finish()`、`_txc_release_alloc()` |
 
 - 依赖: 3.11
-- **测试**: 完整写入事务 → KV 提交 → sync → finalize → alloc release 全路径
+- 测试: 完整写入事务 → KV 提交 → sync → finalize → alloc release 全路径
 
-### 3.13 Zero + Remove + Attrs
+### 3.13 Zero + Remove + Attrs [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `BlueStore.h/cc` | `_do_zero()`、`_do_remove()`、`_do_setattrs()`、`_do_getattrs()` |
 
 - 依赖: 3.12
-- **测试**: 写入 → zero 部分区域 → 读取验证 → 删除 object → 验证空间释放
+- 测试: 写入 → zero 部分区域 → 读取验证 → 删除 object → 验证空间释放
 
-### 3.14 Collection List
+### 3.14 Collection List [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `BlueStore.h/cc` | `_collection_list()`、`get_coll_range()` |
 
 - 依赖: 3.7 + KV iterator
-- **测试**: 创建多个 object → 按范围分页列出 → 验证结果
+- 测试: 创建多个 object → 按范围分页列出 → 验证结果
 
-### 3.15 完整集成测试
+### 3.15 Deferred Write [MVP]
+
+| 文件 | 内容 |
+| --- | --- |
+| `BlueStore.h/cc` | `DeferredWriteQueue`、`submit_deferred()`、`process_deferred()`、状态机扩展（DEFERRED_QUEUED/CLEANUP/DONE） |
+
+- 依赖: 3.12 (KV pipeline) + 3.9 (Small Write)
+- 测试: 小写触发延迟写 → 批量合并 → 刷盘 → 崩溃恢复重放
+
+### 3.16 OMap（对象级 key-value）[P1]
+
+| 文件 | 内容 |
+| --- | --- |
+| `BlueStore.h/cc` | `omap_get()`、`omap_set()`、`omap_rmkeys()`、`omap_get_values()`、`omap_check_keys()` 等 11 个操作 |
+
+- 依赖: 3.6 (Onode + Collection) + KV
+- 测试: set/get/rmkeys 基本操作 → 迭代器遍历 → 边界条件（空 key、超长 key）
+
+### 3.17 FSCK（文件系统检查）[P1]
+
+| 文件 | 内容 |
+| --- | --- |
+| `BlueStore.h/cc` | `fsck()` (SHALLOW/REGULAR/DEEP)、`repair()`、`quick_fix()`、`BlueStoreRepairer`、`StoreSpaceTracker` |
+
+- 依赖: 3.7 (mkfs/mount) + 3.5 (ExtentMap) + 3.13 (Zero/Remove)
+- 测试: 构造损坏元数据 → fsck 检测 → repair 修复 → 验证一致性
+
+### 3.18 Buffer Cache [P1]
+
+| 文件 | 内容 |
+| --- | --- |
+| `BlueStore.h/cc` | `BufferCache`、`OnodeCache`、LRU 淘汰策略、`_read_cache()`、`_write_cache()` |
+
+- 依赖: 3.11 (Read) + 3.9/3.10 (Write)
+- 测试: 读取命中缓存 → 写入更新缓存 → LRU 淘汰验证 → 并发访问正确性
+
+### 3.19 完整集成测试 [MVP]
 
 | 文件 | 内容 |
 | --- | --- |
 | `test_bluestore.cc` | 全路径场景：mkfs → mount → 多次写入 → 读取 → zero → remove → collection list → umount → mount → 验证持久化 |
 
 - 依赖: 所有
-- **测试**: 压力测试、崩溃恢复、边界条件
+- 测试: 压力测试、崩溃恢复、边界条件
 
 ---
 
@@ -338,6 +399,10 @@
   2.6 Logger ──── 无 BlueFS 依赖
   2.7 BlueRocksEnv 集成 ──── 2.2–2.6
 
+阶段 2.5: Throttle
+  2.5.1 Throttle 核心实现 ──── 无依赖
+  2.5.2 集成验证 ──── 2.5.1
+
 阶段三: BlueStore
   3.1 bluestore_types ─────────────────────────────────────────
   3.2 Config                                                    │
@@ -353,7 +418,11 @@
   3.12 KV pipeline ◄───────────────────────────────────────────┤
   3.13 Zero + Remove + Attrs ◄─────────────────────────────────┤
   3.14 Collection List ◄───────────────────────────────────────┤
-  3.15 集成测试 ◄──────────────────────────────────────────────┘
+  3.15 Deferred Write ◄────────── 3.12 + 3.9                   │
+  3.16 OMap [P1] ◄────────── 3.6 + KV                          │
+  3.17 FSCK [P1] ◄────────── 3.7 + 3.5 + 3.13                 │
+  3.18 Buffer Cache [P1] ◄────────── 3.11 + 3.9/3.10           │
+  3.19 集成测试 ◄──────────────────────────────────────────────┘
 ```
 
 ---
@@ -361,7 +430,7 @@
 ## 阶段四：BTier（分层存储引擎）
 
 > BTier 是独立的块级分层存储引擎，不依赖 BlueStore/kv/RocksDB。详细设计见 [design/btier.md](design/btier.md)。
-> 开发顺序：**A (I/O 路径) → B (双层 + 评分) → C1 (迁移) → C2 (压缩 + 集成)**
+> 开发顺序：A (I/O 路径) → B (双层 + 评分) → C1 (迁移) → C2 (压缩 + 集成)
 
 ### 阶段 A：核心 I/O 路径
 

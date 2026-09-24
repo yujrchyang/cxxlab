@@ -203,7 +203,7 @@ BlueFS 从 `libbluestore.so` 中拆出为独立的 `libbluefs.so`（SHARED）。
 
 拆分理由：
 
-- BlueFS 对 kv/RocksDB **零依赖**，是真正独立的子系统
+- BlueFS 对 kv/RocksDB 零依赖，是真正独立的子系统
 - 独立 `.so` 允许任何基于 RocksDB 的应用复用 BlueFS 作为用户态存储后端
 - `bluefs_shared_alloc_context_t` 跨库传递 Allocator 指针，接口不变（通过 `add_block_device()` 参数）
 - BTier 等引擎未来可复用 BlueFS（例如将 journal 放在 BlueFS 上）

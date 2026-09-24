@@ -4,10 +4,10 @@
 
 cxxlab 采用分层打包策略：
 
-- **第三方依赖**（RocksDB、ISA-L、spdlog）：统一打包，安装到私有路径
-- **cxxlab 核心库**：打包为独立 RPM，依赖第三方包
-- **用户程序**：链接 cxxlab 库，不直接接触第三方依赖
-- **测试框架**（Google Test）：仅构建时使用，不进入安装包
+- 第三方依赖（RocksDB、ISA-L、spdlog）：统一打包，安装到私有路径
+- cxxlab 核心库：打包为独立 RPM，依赖第三方包
+- 用户程序：链接 cxxlab 库，不直接接触第三方依赖
+- 测试框架（Google Test）：仅构建时使用，不进入安装包
 
 ## 2. 第三方依赖打包策略
 
@@ -15,10 +15,10 @@ cxxlab 采用分层打包策略：
 
 | 依赖 | 版本 | 用途 | 打包方式 |
 | ------ | ------ | ------ | --------- |
-| **RocksDB** | 7.10.2 | KV 存储引擎 | 动态库 ✅ |
-| **ISA-L** | - | 存储加速（CRC、RAID） | 动态库 ✅ |
-| **spdlog** | - | 日志框架（bundled fmt） | 动态库 ✅ |
-| **Google Test** | - | 测试框架 | 不打包 ❌ |
+| RocksDB | 7.10.2 | KV 存储引擎 | 动态库 ✅ |
+| ISA-L | - | 存储加速（CRC、RAID） | 动态库 ✅ |
+| spdlog | - | 日志框架（bundled fmt） | 动态库 ✅ |
+| Google Test | - | 测试框架 | 不打包 ❌ |
 
 ### 2.2 为什么统一打包
 
@@ -422,12 +422,12 @@ ldd /usr/lib/cxxlab/libkv.so
 
 cxxlab 的打包策略核心要点：
 
-1. **第三方库统一打包**：RocksDB、ISA-L、spdlog 统一打包到 `/usr/lib/cxxlab-thirdparty/`
-2. **RPATH 定向**：cxxlab 库通过 RPATH 指向私有路径，避免系统库污染
-3. **版本绑定**：cxxlab 明确声明依赖的第三方库版本
-4. **ldconfig 集成**：通过 `/etc/ld.so.conf.d/` 注册库路径
-5. **开发包分离**：提供 `-devel` 包供二次开发使用
-6. **测试框架隔离**：Google Test 仅在构建时使用，不进入安装包
+1. 第三方库统一打包：RocksDB、ISA-L、spdlog 统一打包到 `/usr/lib/cxxlab-thirdparty/`
+2. RPATH 定向：cxxlab 库通过 RPATH 指向私有路径，避免系统库污染
+3. 版本绑定：cxxlab 明确声明依赖的第三方库版本
+4. ldconfig 集成：通过 `/etc/ld.so.conf.d/` 注册库路径
+5. 开发包分离：提供 `-devel` 包供二次开发使用
+6. 测试框架隔离：Google Test 仅在构建时使用，不进入安装包
 
 这种策略确保了：
 

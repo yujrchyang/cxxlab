@@ -12,6 +12,7 @@
 - **先读 Ceph，再写代码**：每步开发前必须分析 Ceph reference (`/home/yujrchyang/opensrc/ceph/`) 中对应模块的完整实现（.h + .cc），理解完整逻辑、数据结构、边界条件后再开始编码。禁止仅凭设计文档或记忆实现。
 - **新源码文件名必须小写**：所有新增源码文件（`.h`/`.cc`）使用全小写字母命名（如 `bluefs.h`/`bluefs.cc`），禁止大写字母。
 - **Markdown 必须通过 markdownlint**：每次创建或修改 `.md` 文件后，必须运行 `markdownlint <file>` 检查语法并修复全部告警，通过后才算完成。
+- **Markdown 不使用加粗语法**：`docs/` 目录下的 `.md` 文件禁止使用 `**text**` 加粗语法。使用标题层级、列表结构、代码标记等替代强调。
 - **ASCII 框线图内部保持纯英文**：`┌─┐`/`│ │`/`└─┘` 这类**闭合框线图**（有横向边框包围的对齐区域），框内内容只能用 ASCII 字符（英文/数字/符号）；中文字形在等宽字体中占 2 列，会导致框线错位。框外的中文标注/图例可自由使用。`│├└─` 纵向缩进流程树不在此列（连接符全为 ASCII 单宽，中文作为节点内容不影响对齐）。闭合框内必须含中文时改用 Markdown 列表/缩进格式表达，不使用 Mermaid/SVG 等替代方案。
 
 ## Headers
@@ -47,7 +48,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - kv/ compiles as SHARED library (`libkv.so`), links `common` (PUBLIC) + `RocksDB::RocksDB` (PRIVATE)
 - bluefs/ compiles as SHARED library (`libbluefs.so`), links `common` (PUBLIC) + `blk` (PUBLIC), no kv/RocksDB
 - bluestore/ compiles as SHARED library (`libbluestore.so`), links `common` (PUBLIC) + `kv` (PUBLIC) + `blk` (PUBLIC) + `bluefs` (PUBLIC) + `RocksDB` (PRIVATE)
-- `kv/CMakeLists.txt` uses `-Wno-unused-parameter` due to RocksDB callback signatures
+- `kv/CMakeLists.txt`: kv compiles with default warnings; RocksDB callback unused parameters handled by RocksDB's own build flags
 
 ### Serialization: `common/denc.h` (DENC framework)
 
@@ -160,6 +161,10 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
   - `BlueFSRocksdbLogger`: stderr-based rocksdb::Logger, factory `CreateRocksdbLogger()`
   - Absolute path escape: files starting with `/` forwarded to POSIX Env
   - 29 tests covering all operations, all pass
+- **Throttle implementation:**
+  - `common/throttle.h` / `common/throttle.cc`: Generic resource rate limiting with FIFO fair queuing
+  - Per-waiter condition variable pattern (from Ceph Throttle), oversized request handling, timeout support
+  - 20 tests covering basic ops, FIFO fairness, high concurrency (100 threads), all pass
 
 ### Key Decisions
 
@@ -184,11 +189,16 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 - `dirty_.pending_release` vector resized to `MAX_BDEV` in `_init_alloc` (accessed as `pending_release[e.bdev]`); `_flush_and_sync_log` processes in-place instead of swap-and-discard to preserve vector size
 - KernelDevice `write`/`read`: skip `is_valid_io` alignment check for buffered IO (kernel page cache handles misalignment)
 - Allocator::create() type `"stupid"` maps to AvlAllocator
-- **Allocator extracted from `bluestore/` to `blk/`** (Phase 0 refactoring): Allocator is pure memory management with no dependency on RocksDB or FreelistManager. `common/extent_types.h` created with `pextent_t`, `PExtentVector`, `interval_set<T>`. `bluestore/bluestore_types.h` now a thin wrapper. Allocator tests moved to `tests/blk/`. `bluestore` now links `blk` (PUBLIC).
+- **Allocator extracted from `bluestore/` to `blk/`** (Phase 0 refactoring): Allocator is pure memory management with no dependency on RocksDB or FreelistManager. `blk/extent_types.h` created with `pextent_t`, `PExtentVector`. `common/interval_set.h` extracted as separate file. `bluestore/bluestore_types.h` now a thin wrapper. Allocator tests moved to `tests/blk/`. `bluestore` now links `blk` (PUBLIC).
+- **BlueStore 功能裁剪** (Phase 3 评审): 201 个功能点分 4 优先级 — 104 项 MVP (52%) + 41 项 P1 + 28 项 P2 + 28 项 Deferred。详见 `docs/design/bluestore.md`
+- **Deferred Write 纳入 MVP**: 小写性能关键路径，状态机从 8 态恢复为完整 11 态
+- **FSCK 全功能纳入 P1**: 数据安全关键，含 SHALLOW/REGULAR/DEEP 三级检查 + repair + quick_fix
+- **Throttle 提取到 `common/`**: 通用限流基础库（Phase 2.5），不绑定 BlueStore，供 BTier/kv 等组件复用
+- **OMap 纳入 P1**: 对象级 key-value 存储，11 个操作方法
 
-### Development Plan (3 phases, bottom-up)
+### Development Plan (3 phases + 2.5, bottom-up)
 
-开发顺序 **BlueFS → BlueRocksEnv → BlueStore**，详见 `docs/plan.md`。
+开发顺序 **BlueFS → BlueRocksEnv → Throttle → BlueStore**，详见 `docs/plan.md`。
 
 #### Phase 1: BlueFS (11 steps)
 
@@ -218,7 +228,13 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 | 2.6 | BlueFSRocksdbLogger | dout 输出验证 | ✅ |
 | 2.7 | BlueRocksEnv 集成 + EnvMirror | 与 POSIX Env 双路验证 | ✅ |
 
-#### Phase 3: BlueStore (15 steps)
+#### Phase 2.5: Throttle 基础库 (1 step)
+
+| # | Step | Test Strategy | Status |
+| --- | ------ | --------------- | -------- |
+| 2.5 | `common/throttle` — 通用资源限流 | 并发获取/释放/超时/上限保护 | ✅ |
+
+#### Phase 3: BlueStore (19 steps)
 
 | # | Step | Test Strategy |
 | --- | ------ | --------------- |
@@ -236,7 +252,11 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 | 3.12 | KV pipeline (kv_sync_thread, kv_finalize_thread, release) | 完整事务生命周期 |
 | 3.13 | Zero + Remove + Attrs | 数据打孔→删除→空间释放 |
 | 3.14 | Collection List | 对象分页列出 |
-| 3.15 | 集成测试 | 压力 + 持久化 + 边界 |
+| 3.15 | Deferred Write (延迟写路径) | 小写→RocksDB→批量刷盘 |
+| 3.16 | OMap (对象级 key-value) [P1] | set/get/iterate/rmkeys |
+| 3.17 | FSCK (文件系统检查) [P1] | SHALLOW/REGULAR/DEEP + repair |
+| 3.18 | Buffer Cache [P1] | Onode + Buffer 分片 LRU |
+| 3.19 | 集成测试 | 压力 + 持久化 + 边界 |
 
 ### Next Steps
 
@@ -261,10 +281,10 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 - `bluestore/blue_rocks_env.h` / `bluestore/blue_rocks_env.cc`: BlueRocksEnv (rocksdb::Env adapter for BlueFS)
 - `bluestore/bluestore_types.h`: bluestore_pextent_t alias
 - `bluestore/CMakeLists.txt`: builds libbluestore.so (SHARED), links common (PUBLIC) + kv (PUBLIC) + blk (PUBLIC) + bluefs (PUBLIC) + RocksDB (PRIVATE)
-- `bluestore/allocator.h` / `bluestore/allocator.cc`: Allocator abstract base + factory
-- `bluestore/avl_allocator.h` / `bluestore/avl_allocator.cc`: AvlAllocator (interval-tree)
-- `bluestore/bitmap_allocator.h` / `bluestore/bitmap_allocator.cc`: BitmapAllocator (2-level bitmap)
-- `bluestore/hybrid_allocator.h` / `bluestore/hybrid_allocator.cc`: HybridAllocator (AVL + bitmap)
+- `blk/allocator.h` / `blk/allocator.cc`: Allocator abstract base + factory
+- `blk/avl_allocator.h` / `blk/avl_allocator.cc`: AvlAllocator (interval-tree)
+- `blk/bitmap_allocator.h` / `blk/bitmap_allocator.cc`: BitmapAllocator (2-level bitmap)
+- `blk/hybrid_allocator.h` / `blk/hybrid_allocator.cc`: HybridAllocator (AVL + bitmap)
 - `tests/kv/test_librocksdb.cc`: 23 raw RocksDB tests
 - `tests/kv/test_rocksdb.cc`: 21 RocksDBStore tests
 - `tests/kv/test_memdb.cc`: 36 MemDB tests
@@ -273,10 +293,11 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 - `tests/bluefs/test_bluefs.cc`: BlueFS functional tests (55 tests)
 - `tests/bluestore/test_bitmap_freelist_manager.cc`: 15 BitmapFreelistManager tests
 - `tests/bluestore/test_blue_rocks_env.cc`: BlueRocksEnv tests (29 tests)
-- `tests/bluestore/test_avl_allocator.cc`: 21 AvlAllocator tests
-- `tests/bluestore/test_bitmap_allocator.cc`: 33 BitmapAllocator tests
-- `tests/bluestore/test_hybrid_allocator.cc`: 19 HybridAllocator tests
+- `tests/blk/test_avl_allocator.cc`: 21 AvlAllocator tests
+- `tests/blk/test_bitmap_allocator.cc`: 33 BitmapAllocator tests
+- `tests/blk/test_hybrid_allocator.cc`: 19 HybridAllocator tests
 - `tests/kv/CMakeLists.txt`: test targets linking kv + RocksDB + cxxlab_test_helpers + GTest
+- `common/throttle.h` / `common/throttle.cc`: Throttle class for resource rate limiting
 - `docs/design/keyvalue-db.md`: full design specification
 - `docs/design/freelist-manager.md`: FreelistManager/BitmapFreelistManager design analysis (Ceph reference: `src/os/bluestore/FreelistManager.*`, `BitmapFreelistManager.*`)
 - `docs/design/allocator.md`: Allocator design (Avl + Bitmap + Hybrid)

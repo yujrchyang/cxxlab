@@ -153,7 +153,7 @@ struct pextent_t {
     pextent_t() = default;
     pextent_t(uint64_t o, uint32_t l) : offset(o), length(l) {}
 };
-using PExtVector = std::vector<pextent_t>;
+using PExtentVector = std::vector<pextent_t>;
 
 // bluestore/bluestore_types.h
 using bluestore_pextent_t = pextent_t;  // 别名，保持 API 兼容
@@ -351,7 +351,7 @@ class TransContext {
 };
 ```
 
-> cxxlab 简化： 移除 statfs delta、BlueStoreThrottle。不实现 deferred write（初始版本全部使用同步 AIO 路径）。
+> cxxlab 简化： 移除 statfs delta。BlueStoreThrottle 提取到 `common/Throttle`（Phase 2.5）。Deferred Write 纳入 MVP（小写性能关键路径），状态机保留完整 11 态。
 
 ## 4. 关键组件
 
@@ -450,7 +450,7 @@ void _kv_sync_thread();
 void _kv_finalize_thread();
 ```
 
-> cxxlab 简化： 使用单线程模型，kv_sync_thread 和 kv_finalize_thread 各一个线程。移除 BlueStoreThrottle 和复杂的并发控制。
+> cxxlab 简化： 使用单线程模型，kv_sync_thread 和 kv_finalize_thread 各一个线程。BlueStoreThrottle 提取到 `common/Throttle`（Phase 2.5），简化并发控制。
 
 ## 5. IO 生命周期
 
@@ -550,11 +550,8 @@ mount()
   │     kv_sync_thread.start(_kv_sync_thread, this)
   │     kv_finalize_thread.start(_kv_finalize_thread, this)
   │
-  ├── 8. 重放 Deferred WAL
-  │     // 若存在 PREFIX_DEFERRED 条目，重新执行未完成的写入
-  │
-  └── 9. 启动缓存管理线程
-        mempool_thread.start(...)
+  └── 8. 重放 Deferred WAL
+        // 若存在 PREFIX_DEFERRED 条目，重新执行未完成的写入
 ```
 
 ### 5.3 写入路径
@@ -776,7 +773,7 @@ _txc_release_alloc(txc):
                                                     STATE_DONE
 ```
 
-> cxxlab 简化： 不实现 deferred write 路径。所有写入在 AIO 完成后立即通过 KV 事务持久化，不走 WAL 延迟提交。
+> cxxlab 说明： Deferred Write 纳入 MVP。小写入（≤min_alloc_size）先写入 RocksDB WAL，后台线程批量合并后刷盘，将 HDD 随机小写转为顺序大写。状态机增加 DEFERRED_QUEUED → DEFERRED_CLEANUP → DEFERRED_DONE 三个状态。
 
 ### 6.3 OpSequencer 顺序保证
 
@@ -819,54 +816,408 @@ mount()
   ├── _kv_start()
   │     start kv_sync_thread, kv_finalize_thread
   │
-  ├── _deferred_replay()
-  │     // 重放 deferred WAL（如果存在）
-  │
-  └── _mempool_thread.start()
+  └── _deferred_replay()
+        // 重放 deferred WAL（如果存在）
 ```
 
-## 8. 简化与决策
+## 8. 功能裁剪与优先级
 
-### 8.1 设计简化
+BlueStore 功能按 8 大需求类别组织，每个功能点标注优先级：
 
-| Ceph 实现 | cxxlab 处理方式 |
+- MVP: 最小可行产品（104 项，52%）— 核心读写路径、事务语义、空间管理、基本完整性、最小性能、单设备
+- P1: 强烈建议（41 项，20%）— OMap、FSCK、Buffer Cache、增强可靠性
+- P2: 后续迭代（28 项，14%）— 诊断、高级缓存、错误注入测试
+- Deferred: 明确延迟（28 项，14%）— ADR-03（压缩）、ADR-04（SharedBlob/Clone/Snapshot）、多设备操作
+
+### 8.1 需求类别
+
+| # | 需求类别 | 核心目标 |
+| --- | --- | --- |
+| R1 | 数据持久化 | 对象数据直接写入块设备，元数据写入 KV |
+| R2 | 事务语义 | 写操作具备原子性和崩溃一致性 |
+| R3 | 空间管理 | 块设备空间的分配、释放、碎片整理 |
+| R4 | 数据完整性 | 校验和验证、错误检测与恢复 |
+| R5 | 性能优化 | 缓存、延迟写入、压缩、GC |
+| R6 | 分布式支撑 | SharedBlob/clone/snapshot 支持 PG 分裂/合并 |
+| R7 | 可观测性与运维 | 性能计数、统计、告警、配置热更新 |
+| R8 | 多设备管理 | BlueFS 集成、设备迁移/扩展、卷选择器 |
+
+### 8.2 功能点统计
+
+| 需求类别 | 总数 | MVP | P1 | P2 | Deferred |
+| --- | --- | --- | --- | --- | --- |
+| R1. 数据持久化 | 35 | 24 | 3 | 3 | 5 |
+| R2. 事务语义 | 30 | 24 | 3 | 1 | 2 |
+| R3. 空间管理 | 30 | 27 | 1 | 2 | 0 |
+| R4. 数据完整性 | 20 | 11 | 8 | 1 | 0 |
+| R5. 性能优化 | 35 | 9 | 15 | 5 | 6 |
+| R6. 分布式支撑 | 13 | 1 | 4 | 0 | 8 |
+| R7. 可观测性与运维 | 26 | 3 | 7 | 16 | 0 |
+| R8. 多设备管理 | 12 | 5 | 0 | 0 | 7 |
+| 合计 | 201 | 104 (52%) | 41 (20%) | 28 (14%) | 28 (14%) |
+
+> 详细功能点清单见 §9。
+
+## 9. 功能点详细清单
+
+### 9.1 R1: 数据持久化（35 items）
+
+| # | 功能点 | 优先级 | 说明 |
+| --- | --- | --- | --- |
+| 1 | `bluestore_bdev_label_t` | MVP | 设备标签（uuid, size, meta map） |
+| 2 | `bluestore_cnode_t` | MVP | Collection 元数据（bits） |
+| 3 | `bluestore_pextent_t` | MVP | 已实现（`blk/extent_types.h`） |
+| 4 | `bluestore_extent_ref_map_t` | Deferred | extent 引用计数（ADR-04） |
+| 5 | `bluestore_blob_use_tracker_t` | MVP | AU 级引用追踪 |
+| 6 | `bluestore_blob_t` | MVP | Blob 元数据（去掉压缩/shared） |
+| 7 | `bluestore_shared_blob_t` | Deferred | 共享 Blob（ADR-04） |
+| 8 | `bluestore_onode_t` | MVP | 对象元数据（去掉 zone_offset_refs） |
+| 9 | `bluestore_deferred_op_t` | MVP | 延迟写操作描述 |
+| 10 | `bluestore_deferred_transaction_t` | P1 | 延迟事务描述 |
+| 11 | `bluestore_compression_header_t` | Deferred | 压缩头（ADR-03） |
+| 12 | `Buffer` | P1 | Buffer cache 条目 |
+| 13 | `BufferSpace` | P1 | Buffer cache 管理 |
+| 14 | `SharedBlob` | Deferred | 共享 Blob 运行时（ADR-04） |
+| 15 | `SharedBlobSet` | Deferred | 共享 Blob 集合（ADR-04） |
+| 16 | `Blob`（内存中） | MVP | 运行时 Blob 封装 + use_tracker |
+| 17 | `Extent` | MVP | 逻辑偏移→blob 映射 |
+| 18 | `OldExtent` | MVP | 旧 extent 释放追踪 |
+| 19 | `ExtentMap` + shards | MVP | extent 管理 + 分片编码 |
+| 20 | `GarbageCollector` | P2 | 压缩场景下的 GC |
+| 21 | `Onode`（内存中） | MVP | 运行时对象元数据 |
+| 22 | `OnodeSpace` | MVP | Onode 缓存（单 LRU） |
+| 23 | `OnodeCacheShard` | P2 | 分片 Onode 缓存 |
+| 24 | `BufferCacheShard` | P2 | 分片 Buffer 缓存 |
+| 25 | `Collection` | MVP | PG 管理 |
+| 26 | `WriteContext` | MVP | 写操作上下文 |
+| 27 | `TransContext` | MVP | 事务上下文状态机（11 态） |
+| 28 | `OpSequencer` | MVP | 事务排序器 |
+| 29 | PREFIX_SUPER（`"S"`） | MVP | 超级块元数据前缀 |
+| 30 | PREFIX_COLL（`"C"`） | MVP | Collection 元数据前缀 |
+| 31 | PREFIX_OBJ（`"O"`） | MVP | Onode + extent shard 前缀 |
+| 32 | PREFIX_DEFERRED（`"L"`） | MVP | 延迟写 WAL 前缀 |
+| 33 | PREFIX_ALLOC_BITMAP（`"b"`） | MVP | 已实现（BitmapFM） |
+| 34 | Key 编码函数集 | MVP | append_escaped, encode/decode |
+| 35 | 生命周期管理 | MVP | mkfs/mount/umount |
+
+### 9.2 R2: 事务语义（30 items）
+
+| # | 功能点 | 优先级 | 说明 |
+| --- | --- | --- | --- |
+| 1 | `queue_transactions()` | MVP | 事务入口 |
+| 2 | `_txc_add_transaction` | MVP | OSD 事务→BlueStore 分发 |
+| 3 | `_txc_state_proc` | MVP | 状态机驱动 |
+| 4 | `_txc_aio_submit` | MVP | AIO 提交 |
+| 5 | `_txc_finish_io` | MVP | IO 保序 |
+| 6 | `_txc_write_nodes` | MVP | onode→KV 写入 |
+| 7 | `_txc_finalize_kv` | MVP | FM 分配/释放持久化 |
+| 8 | `_txc_apply_kv` | MVP | KV 提交 + sync |
+| 9 | `_txc_committed_kv` | MVP | KV 提交后回调 |
+| 10 | `_txc_finish` | MVP | 事务清理 |
+| 11 | `_txc_release_alloc` | MVP | 空间归还分配器 |
+| 12 | `_do_write` | MVP | 写入分发入口 |
+| 13 | `_do_write_small` | MVP | 小写入（≤1 AU，RMW） |
+| 14 | `_do_write_big` | MVP | 大写入（多 AU 对齐） |
+| 15 | `_do_alloc_write` | MVP | 空间分配 + 写入 |
+| 16 | `_wctx_finish` | MVP | 写上下文完成 |
+| 17 | `_do_read` | MVP | 读取主路径 |
+| 18 | `_do_zero` | MVP | 零填充 |
+| 19 | `_do_remove` | MVP | 对象删除 |
+| 20 | `_do_truncate` | MVP | 截断 |
+| 21 | `_setattr` / `_setattrs` | MVP | 属性设置 |
+| 22 | `_rmattr` / `_rmattrs` | MVP | 属性删除 |
+| 23 | `_rename` | MVP | 对象重命名 |
+| 24 | `_collection_list` | MVP | 对象列举 |
+| 25 | `_do_omap_set` | P1 | OMap 设置 |
+| 26 | `_do_omap_get` | P1 | OMap 获取 |
+| 27 | `_do_omap_rm` | P1 | OMap 删除 |
+| 28 | `_do_gc` | P2 | GC（无压缩，仅整理） |
+| 29 | `_do_clone_range` | Deferred | Clone 范围（ADR-04） |
+| 30 | `_clone` / `_clone_range` | Deferred | Clone 操作（ADR-04） |
+
+### 9.3 R3: 空间管理（30 items）
+
+| # | 功能点 | 优先级 | 说明 |
+| --- | --- | --- | --- |
+| 1 | `bluestore_pextent_t` 结构 | MVP | 已实现 |
+| 2 | `bluestore_blob_use_tracker_t` | MVP | AU 引用追踪 |
+| 3 | `ExtentMap` 结构 | MVP | 逻辑→物理映射 |
+| 4 | `extent_map_shards` | MVP | onode 分片索引 |
+| 5 | `seek_lextent` | MVP | 查找逻辑 extent |
+| 6 | `add` / `rm` extent | MVP | 增删 extent |
+| 7 | `punch_hole` | MVP | 数据打孔 |
+| 8 | `compress_extent_map` | MVP | 压缩 extent 映射 |
+| 9 | `fault_range` | MVP | 按需加载 shard |
+| 10 | `dirty_range` | MVP | 脏范围追踪 |
+| 11 | `needs_reshard` | MVP | 重分片判断 |
+| 12 | `reshard` | MVP | extent map 重分片 |
+| 13 | `encode_some` / `decode` | MVP | extent 编解码 |
+| 14 | Allocator 集成 | MVP | 分配器调用 |
+| 15 | FreelistManager 集成 | MVP | FM 调用 |
+| 16 | 空间分配路径 | MVP | alloc + FM mark_alloc |
+| 17 | 空间释放路径 | MVP | FM mark_free + alloc release |
+| 18 | `_pad_zeros` | MVP | 数据对齐填充 |
+| 19 | extent 分裂 | MVP | blob split 操作 |
+| 20 | extent 合并 | MVP | 相邻 extent 合并 |
+| 21 | `_set_alloc_hint` | P1 | 分配提示 |
+| 22 | 碎片整理 | P2 | 在线碎片整理 |
+| 23 | 空间统计 | P2 | used/avail 统计 |
+| 24 | extent_map_t 容器 | MVP | `std::set` |
+| 25 | shard 编码格式 | MVP | onode 内 shard 编码 |
+| 26 | shard 加载 | MVP | 从 KV 加载 shard |
+| 27 | shard 持久化 | MVP | shard 写入 KV |
+| 28 | 批量分配 | MVP | 多 extent 批量分配 |
+| 29 | 过度分配处理 | MVP | overclaim 处理 |
+| 30 | pending_release 管理 | MVP | 延迟释放队列 |
+
+### 9.4 R4: 数据完整性（20 items）
+
+| # | 功能点 | 优先级 | 说明 |
+| --- | --- | --- | --- |
+| 1 | `Checksummer` 枚举 | MVP | 仅保留 NONE + CRC32C |
+| 2 | CRC32C 校验和计算 | MVP | ISA-L 已支持 |
+| 3 | `_verify_csum` | MVP | 读取时校验验证 |
+| 4 | `_generate_csum` | MVP | 写入时校验生成 |
+| 5 | `bluestore_bdev_label_t` | MVP | 设备标签定义 |
+| 6 | `_write_bdev_label` | MVP | 标签写入 |
+| 7 | `_read_bdev_label` | MVP | 标签读取 |
+| 8 | `_check_or_set_bdev_label` | MVP | 标签校验/创建 |
+| 9 | 超级块读写 | MVP | superblock 持久化 |
+| 10 | 崩溃恢复 | MVP | mount 时日志重放 |
+| 11 | 数据一致性保证 | MVP | 写顺序 + sync |
+| 12 | FSCK 主入口 | P1 | `fsck()` 函数 |
+| 13 | FSCK onode 检查 | P1 | onode 完整性验证 |
+| 14 | FSCK blob 检查 | P1 | blob 完整性验证 |
+| 15 | FSCK extent 检查 | P1 | extent map 一致性 |
+| 16 | FSCK freelist 检查 | P1 | freelist 一致性 |
+| 17 | FSCK collection 检查 | P1 | collection 一致性 |
+| 18 | FSCK repair 功能 | P1 | 自动修复 |
+| 19 | FSCK cross-ref 验证 | P1 | 元数据↔分配交叉检查 |
+| 20 | FSCK 统计报告 | P2 | 错误计数/报告 |
+
+### 9.5 R5: 性能优化（35 items）
+
+| # | 功能点 | 优先级 | 说明 |
+| --- | --- | --- | --- |
+| 1 | `Buffer` 类 | P1 | 缓存条目 |
+| 2 | `BufferSpace` 类 | P1 | 缓存空间 |
+| 3 | Buffer 状态管理 | P1 | empty/writing/reading/clean |
+| 4 | Buffer LRU 管理 | P1 | 最近最少使用淘汰 |
+| 5 | `_read_cache` | P1 | 缓存命中检查 |
+| 6 | `_generate_read_result_bl` | MVP | 组装读取结果 |
+| 7 | `_prepare_read_ioc` | MVP | 构建 AIO 读取 |
+| 8 | `_choose_write_options` | Deferred | 写选项选择（简化版 MVP） |
+| 9 | Deferred Write 核心 | MVP | `_do_deferred_write` |
+| 10 | `_deferred_submit` | MVP | 延迟写提交 |
+| 11 | `DeferredBatch` | P1 | 延迟写批处理 |
+| 12 | `DeferredBatch::Op` | P1 | 批处理操作 |
+| 13 | `_deferred_try_submit` | P1 | 尝试提交 |
+| 14 | `_deferred_finished` | P1 | 完成回调 |
+| 15 | `_deferred_aio_finish` | P1 | AIO 完成处理 |
+| 16 | `_deferred_replay` | MVP | 崩溃恢复重放 |
+| 17 | `BigDeferredWriteContext` | P2 | 大块延迟写 |
+| 18 | `BlueStoreThrottle` | P1 | 提取到 common（Phase 2.5） |
+| 19 | Throttle 字节限制 | P1 | `throttle_bytes` |
+| 20 | Throttle deferred 限制 | P1 | `throttle_deferred_bytes` |
+| 21 | Throttle 等待/唤醒 | P1 | 阻塞/唤醒机制 |
+| 22 | `_do_gc` | P2 | GC 核心（无压缩） |
+| 23 | GC 范围选择 | P2 | GC 候选范围 |
+| 24 | GC extent 合并 | P2 | GC 合并操作 |
+| 25 | 压缩集成点 | Deferred | 压缩/解压入口（ADR-03） |
+| 26 | `_decompress` | Deferred | 解压函数（ADR-03） |
+| 27 | 压缩头处理 | Deferred | compression_header（ADR-03） |
+| 28 | 压缩提示 | Deferred | compress hint（ADR-03） |
+| 29 | 压缩统计 | Deferred | compress stats（ADR-03） |
+| 30 | 读取路径优化 | MVP | 直接 IO 读取 |
+| 31 | 写入路径优化 | MVP | 直接写入块设备 |
+| 32 | 缓存淘汰策略 | P1 | LRU/LFU 策略 |
+| 33 | 预读取 | P2 | read-ahead |
+| 34 | 写入合并 | MVP | 相邻写合并 |
+| 35 | 批量提交 | MVP | KV 批量写入 |
+
+### 9.6 R6: 分布式支撑（13 items）
+
+| # | 功能点 | 优先级 | 说明 |
+| --- | --- | --- | --- |
+| 1 | `OldExtent` 释放追踪 | MVP | 旧 extent 引用释放 |
+| 2 | `bluestore_extent_ref_map_t` | Deferred | 共享引用映射（ADR-04） |
+| 3 | `SharedBlob` 内存管理 | Deferred | 共享 Blob 运行时（ADR-04） |
+| 4 | `SharedBlobSet` | Deferred | 共享 Blob 集合（ADR-04） |
+| 5 | `bluestore_shared_blob_t` | Deferred | 共享 Blob 持久化（ADR-04） |
+| 6 | sbid 分配 | Deferred | 共享 Blob ID（ADR-04） |
+| 7 | `_clone` | Deferred | 对象克隆（ADR-04） |
+| 8 | `_clone_range` | Deferred | 范围克隆（ADR-04） |
+| 9 | `_do_clone_range` | Deferred | clone range 操作（ADR-04） |
+| 10 | Collection split | P1 | PG 分裂 |
+| 11 | Collection merge | P1 | PG 合并 |
+| 12 | split/merge 元数据更新 | P1 | cnode bits 更新 |
+| 13 | split/merge onode 迁移 | P1 | onode 重分配 |
+
+### 9.7 R7: 可观测性与运维（26 items）
+
+| # | 功能点 | 优先级 | 说明 |
+| --- | --- | --- | --- |
+| 1 | 基础性能计数器 | P2 | 读写延迟/吞吐 |
+| 2 | 扩展性能计数器 | P2 | 细分操作统计 |
+| 3 | PREFIX_STAT（`"T"`） | P2 | 统计前缀 |
+| 4 | Int64Array merge 统计 | P2 | merge operator 统计 |
+| 5 | `volatile_statfs` | P2 | 运行时统计 |
+| 6 | FSCK 统计计数 | P1 | 错误/警告计数 |
+| 7 | FSCK 详细报告 | P1 | 分类报告输出 |
+| 8 | FSCK 日志输出 | P1 | 检查过程日志 |
+| 9 | FSCK 进度报告 | P2 | 进度百分比 |
+| 10 | Error injection 框架 | P2 | 故障注入入口 |
+| 11 | Error injection 写入 | P2 | 写入错误注入 |
+| 12 | Error injection 读取 | P2 | 读取错误注入 |
+| 13 | Error injection KV | P2 | KV 错误注入 |
+| 14 | Error injection 设备 | P2 | 设备错误注入 |
+| 15 | BSPerfTracker | P2 | 性能追踪器 |
+| 16 | BlueFS perf counters | P2 | BlueFS 统计 |
+| 17 | BlueStore 日志 | MVP | 结构化日志 |
+| 18 | 事务追踪日志 | MVP | 事务生命周期日志 |
+| 19 | IO 追踪日志 | MVP | IO 路径日志 |
+| 20 | `md_config_obs_t` | P2 | 配置热更新（静态配置） |
+| 21 | `osd_pools_map` | P2 | per-pool 统计 |
+| 22 | 设备统计 | P2 | 设备读写统计 |
+| 23 | 分配器统计 | P1 | 碎片/利用率 |
+| 24 | 缓存统计 | P1 | 命中率/大小 |
+| 25 | 事务统计 | P1 | 事务吞吐/延迟 |
+| 26 | 空间使用统计 | P1 | used/avail/frag |
+
+### 9.8 R8: 多设备管理（12 items）
+
+| # | 功能点 | 优先级 | 说明 |
+| --- | --- | --- | --- |
+| 1 | 设备标签管理 | MVP | 多设备标签 |
+| 2 | BlueFS 集成 | MVP | BlueFS 存 RocksDB |
+| 3 | `RocksDBBlueFSVolumeSelector` | MVP | 卷选择器（已实现） |
+| 4 | `_open_bluefs` / `_close_bluefs` | MVP | BlueFS 挂载/卸载 |
+| 5 | 设备大小验证 | MVP | 设备容量检查 |
+| 6 | 多设备空间分配 | Deferred | 跨设备分配 |
+| 7 | 设备回退策略 | Deferred | WAL→DB→slow 回退 |
+| 8 | `add_block_device` | Deferred | 添加块设备 |
+| 9 | `remove_block_device` | Deferred | 移除块设备 |
+| 10 | `set_volume_selector` | Deferred | 设置卷选择器 |
+| 11 | Device migration | Deferred | 设备数据迁移 |
+| 12 | 多设备统计 | Deferred | 每设备统计 |
+
+## 10. 跨平台适配
+
+cxxlab 需要同时运行在 x86\_64 和 AArch64 上。
+
+### 10.1 平台差异影响
+
+| 差异 | x86\_64 | AArch64 | 对 BlueStore 的影响 |
+| --- | --- | --- | --- |
+| 字节序 | Little-endian | Little-endian | 无影响 |
+| 页大小 | 4KB（固定） | 4KB / 16KB / 64KB | `page.h` 已用 `sysconf(_SC_PAGESIZE)` 动态获取，无影响 |
+| libaio | 完整支持 | 完整支持 | 无影响 |
+| Direct IO 对齐 | 512B 或 4KB | 512B 或 4KB | 无影响（KernelDevice 已处理） |
+| CRC32C 硬件加速 | SSE4.2 (PCLMULQDQ) | CRC 扩展指令 | ISA-L 已屏蔽差异，无影响 |
+| 原子操作 | 8 字节原生 | 8 字节原生（LL/SC 或 LSE） | 无影响（std::atomic 已抽象） |
+
+### 10.2 跨平台约束下的架构简化
+
+| Ceph 优化 | cxxlab 处理 |
 | --- | --- |
-| 压缩（zlib/zstd/lz4/snappy） | 暂不实现 |
-| Shared Blob 克隆引用计数 | 不实现（无 clone/snapshot） |
-| Zoned (SMR) | 不实现 |
-| Null FM（BlueFS 文件替代 KV） | 有设计，初始版本暂不启用 |
-| Deferred Write（WAL 延迟写入） | 初始版本不实现 |
-| PerfCounters 详细统计 | 保留核心统计 |
-| AdminSocket 运行时调试 | 移除 |
-| mempool 内存池统计 | 移除 |
-| BlueStoreThrottle 流量整形 | 移除（`throttle_bytes = 0`） |
-| Omap 操作 | 暂不实现 |
-| Checksum（CRC32C / XXHASH32） | 支持（CRC32C 为默认） |
-| Blob 变长编码（denc_lba / denc_varint_lowz） | 使用简单 DENC |
-| BlueFS 内嵌用户态文件系统 | 已实现（见 [bluefs.md](bluefs.md)） |
-| BlueRocksEnv RocksDB 文件操作适配 | 已实现（见 [blue-rocks-env.md](blue-rocks-env.md)） |
+| `mempool` 内存池 | 移除，使用标准 new/delete |
+| `ceph::shared_mutex` / `ceph::mutex` | 简化为 `std::mutex` / `std::shared_mutex` |
+| `ceph::mono_clock` | 简化为 `std::chrono::steady_clock` |
+| `ceph::condition_variable` | 简化为 `std::condition_variable` |
+| `PerfCounters` + `BSPerfTracker` | 简化，需要时自行实现简单计数 |
+| `Throttle` / `BlueStoreThrottle` | 提取到 common（Phase 2.5） |
+| `Finisher` | 简化为 `std::thread` + `std::function` |
+| `boost::intrusive` 容器 | 可保留（boost 跨平台），但简化为 `std::list`/`std::set` 优先 |
+| `btree::btree_set` | 替换为 `std::set`/`std::map` |
+| `WITH_LTTNG` / `WITH_BLKIN` | 移除 |
 
-### 8.2 关键决策
+结论：ARM/x86 双平台对 BlueStore 核心逻辑无影响。主要适配工作是将 Ceph 自定义同步原语替换为 `std::` 标准库，移除 mempool/PerfCounters 等运行时框架，确保序列化使用 `cxxlab_le*` 类型。
 
-| 决策 | 原因 |
+## 11. MVP 核心能力（104 items）
+
+MVP 阶段必须实现的功能点，按需求类别分组：
+
+### R1 数据持久化（24 items）
+
+- 核心 on-disk 类型：`bluestore_bdev_label_t`, `bluestore_cnode_t`, `bluestore_pextent_t`, `bluestore_blob_use_tracker_t`, `bluestore_blob_t`, `bluestore_onode_t`, `bluestore_deferred_op_t`
+- 核心 in-memory 类型：`Blob`, `Extent`, `OldExtent`, `ExtentMap`, `Onode`, `OnodeSpace`, `Collection`, `WriteContext`, `TransContext`, `OpSequencer`
+- KV 前缀：PREFIX_SUPER, PREFIX_COLL, PREFIX_OBJ, PREFIX_DEFERRED, PREFIX_ALLOC_BITMAP
+- Key 编码函数集
+- 生命周期管理（mkfs/mount/umount）
+
+### R2 事务语义（24 items）
+
+- 事务入口与状态机：`queue_transactions`, `_txc_add_transaction`, `_txc_state_proc`
+- IO 管道：`_txc_aio_submit`, `_txc_finish_io`, `_txc_write_nodes`, `_txc_finalize_kv`, `_txc_apply_kv`, `_txc_committed_kv`, `_txc_finish`, `_txc_release_alloc`
+- 核心操作：`_do_write`, `_do_write_small`, `_do_write_big`, `_do_alloc_write`, `_wctx_finish`, `_do_read`, `_do_zero`, `_do_remove`, `_do_truncate`, `_setattr`/`_setattrs`, `_rmattr`/`_rmattrs`, `_rename`, `_collection_list`
+
+### R3 空间管理（27 items）
+
+- ExtentMap 全功能：seek/add/rm/punch_hole/compress/fault_range/dirty_range/reshard/encode/decode
+- 分配器/FM 集成：分配路径、释放路径、批量分配、过度分配处理
+- Extent 操作：分裂、合并、pending_release 管理
+- 容器选择：`std::set` 作为 extent_map_t
+
+### R4 数据完整性（11 items）
+
+- Checksummer（CRC32C）、校验和生成/验证
+- 设备标签读写、超级块读写
+- 崩溃恢复、数据一致性保证
+
+### R5 性能优化（9 items）
+
+- 读取路径：`_generate_read_result_bl`, `_prepare_read_ioc`
+- Deferred Write 核心：`_do_deferred_write`, `_deferred_submit`, `_deferred_replay`
+- 读写路径优化、写入合并、批量提交
+
+### R6 分布式支撑（1 item）
+
+- `OldExtent` 释放追踪
+
+### R7 可观测性（3 items）
+
+- BlueStore 日志、事务追踪日志、IO 追踪日志
+
+### R8 多设备管理（5 items）
+
+- 设备标签管理、BlueFS 集成、VolumeSelector、BlueFS 挂载/卸载、设备大小验证
+
+## 12. 设计决策
+
+### 12.1 已确认决策
+
+| # | 决策项 | 结论 | 理由 |
+| --- | --- | --- | --- |
+| Q1 | `hobject_t` 简化程度 | 保留 hash/pool/nspace/key/oid/snap 全字段 | 兼容 Ceph key 格式 |
+| Q2 | `extent_map_t` 容器 | `std::set` | 初始简单，后续按需优化 |
+| Q3 | OnodeCache 实现 | 单 LRU（`std::list` + `unordered_map`） | 初始版本够用 |
+| Q4 | BlueStore 编译产物 | 加入 `libbluestore.so` | 统一在 bluestore 库中 |
+| Q5 | ghobject_t 放置位置 | `common/object.h` | BlueStore 核心类型，可能被其他模块引用 |
+| Q6 | AIO 回调机制 | 保持现有 `aio_callback_t` | 已有成熟实现 |
+| Q7 | Buffer Cache 时机 | P1 阶段实现 | MVP 直接从磁盘读，P1 添加缓存层 |
+
+### 12.2 其他已确认决策
+
+| 决策项 | 结论 |
 | --- | --- |
-| 始终使用 BitmapFreelistManager | 简化实现，不移除已实现的组件 |
-| 不使用 deferred write | 减少初始版本复杂度 |
-| 不使用 shared blob | 不实现 clone/snapshot 功能 |
-| 不使用压缩 | 减少初始版本复杂度 |
-| 单线程 KV sync | kv_sync_thread 和 kv_finalize_thread 各一个线程 |
-| 配置结构体 | `BlueStoreConfig` 提供默认值 + 文件加载 |
+| Throttle 提取 | 提取到 `common/` 作为通用限流组件（Phase 2.5），不绑定 BlueStore |
+| Deferred Write | 纳入 MVP，简化实现（保留 WAL + 基本批处理，P1 完善） |
+| FSCK | P1 全功能实现（onode/blob/extent/freelist/collection 检查 + repair） |
+| OMap | P1 实现（set/get/rm + PREFIX_OMAP 前缀） |
+| 压缩 | Deferred（ADR-03），所有压缩相关代码标记为 Deferred |
+| SharedBlob/Clone | Deferred（ADR-04），所有 shared 相关代码标记为 Deferred |
+| 多设备 | Deferred，MVP 仅支持单设备 |
 
-### 8.3 已知待办
+### 12.3 已知待办
 
-- [ ] Deferred write 路径（后续根据性能需求添加）
-- [ ] 压缩
+- [ ] Deferred write 路径（MVP）
+- [ ] 压缩（Deferred）
 - [ ] Null FM 模式启用（设计已完成，见 freelist-manager.md §3.4）
-- [ ] Omap 操作
-- [ ] Buffer cache 实现
-- [ ] 碎片整理/GC
+- [ ] Omap 操作（P1）
+- [ ] Buffer cache 实现（P1）
+- [ ] 碎片整理/GC（P2）
 
-## 9. 参考
+## 13. 参考
 
 - Ceph source: `src/os/bluestore/BlueStore.h` / `.cc`
 - Ceph source: `src/os/bluestore/bluestore_types.h`
@@ -878,4 +1229,5 @@ mount()
 - 本项目 [docs/design/block-device.md](block-device.md): 块设备抽象层设计
 - 本项目 [docs/design/bluefs.md](bluefs.md): BlueFS 设计
 - 本项目 [docs/design/blue-rocks-env.md](blue-rocks-env.md): BlueRocksEnv 设计
+- 本项目 [docs/design/throttle.md](throttle.md): Throttle 设计
 - 本项目 `bluestore/bluestore_types.h`: BlueStore 数据结构定义（Phase 3）
