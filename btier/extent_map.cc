@@ -7,8 +7,10 @@
 #include <set>
 
 #include "btier/config.h"
+#include "btier/key_map.h"
 #include "common/crc32.h"
 #include "common/intarith.h"
+#include "common/interval_set.h"
 
 namespace TOPNSPC::btier {
 
@@ -199,6 +201,21 @@ void ExtentMap::set_randomness(uint64_t extent_id, uint32_t randomness) {
         if (entry->metrics.raw.compare_exchange_weak(
                 old_word, new_word, std::memory_order_relaxed))
             break;
+    }
+}
+
+void ExtentMap::refresh_randomness(const KeyMap &key_map) {
+    auto snap = snapshot();
+    for (const auto &s : snap) {
+        auto keys = key_map.keys_in_extent(s.extent_id);
+        uint32_t randomness = 0;
+        for (const auto &key : keys) {
+            if (key_map.get_consecutive_sequential(key) == 0) {
+                randomness = 63;
+                break;
+            }
+        }
+        set_randomness(s.extent_id, randomness);
     }
 }
 

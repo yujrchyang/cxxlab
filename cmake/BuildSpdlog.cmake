@@ -1,5 +1,5 @@
-# spdlog - static library only, no tests/examples/benchmarks
-set(SPDLOG_BUILD_SHARED OFF CACHE BOOL "" FORCE)
+# spdlog - shared library, no tests/examples/benchmarks
+set(SPDLOG_BUILD_SHARED ON CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_EXAMPLE OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_TESTS OFF CACHE BOOL "" FORCE)
 set(SPDLOG_BUILD_BENCHMARK OFF CACHE BOOL "" FORCE)

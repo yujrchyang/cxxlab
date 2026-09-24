@@ -324,7 +324,7 @@ BitmapFreelistManager 的线程安全模型：
 
 ## 7. 构建
 
-BitmapFreelistManager 作为 `bluestore` 静态库的组件编译（`libbluestore.a`），链接 `kv`（获取 KeyValueDB 接口）、`blk`（Allocator + extent_types）和 `common`（bufferlist, assert 等）。
+BitmapFreelistManager 作为 `bluestore` 动态库的组件编译（`libbluestore.so`），链接 `kv`（获取 KeyValueDB 接口）、`blk`（Allocator + extent_types）和 `common`（bufferlist, assert 等）。
 
 命名空间策略：各模块统一在 `TOPNSPC`（即 `cxxlab`）命名空间内，`bufferlist` 等类型可直接使用。Allocator 已从 `bluestore/` 迁移到 `blk/`（Phase 0 重构），引用时使用 `blk/extent_types.h` 和 `blk/allocator.h`。
 

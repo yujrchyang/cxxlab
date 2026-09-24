@@ -1,13 +1,13 @@
 # cmake/BuildRocksDB.cmake
 # -------------------------------------------------------------------
-# Build RocksDB (v7.10.2) as a static library from submodule
+# Build RocksDB (v7.10.2) as a shared library from submodule
 # -------------------------------------------------------------------
 
 include(ExternalProject)
 
 set(ROCKSDB_SRC_DIR "${CMAKE_CURRENT_SOURCE_DIR}/third_party/rocksdb")
 set(ROCKSDB_BINARY_DIR "${CMAKE_CURRENT_BINARY_DIR}/third_party/rocksdb")
-set(ROCKSDB_LIBRARY "${ROCKSDB_BINARY_DIR}/librocksdb.a")
+set(ROCKSDB_LIBRARY "${ROCKSDB_BINARY_DIR}/librocksdb.so")
 
 set(rocksdb_CMAKE_ARGS
     -DCMAKE_POSITION_INDEPENDENT_CODE=ON
@@ -31,14 +31,14 @@ set(rocksdb_CMAKE_ARGS
     -DWITH_BENCHMARK_TOOLS=OFF
     -DWITH_CORE_TOOLS=OFF
     -DWITH_TOOLS=OFF
-    -DROCKSDB_BUILD_SHARED=OFF
+    -DROCKSDB_BUILD_SHARED=ON
     -DROCKSDB_INSTALL_ON_WINDOWS=OFF
 )
 
 if(CMAKE_MAKE_PROGRAM MATCHES "make")
-    set(make_cmd $(MAKE) rocksdb)
+    set(make_cmd $(MAKE) rocksdb-shared)
 else()
-    set(make_cmd ${CMAKE_COMMAND} --build <BINARY_DIR> --target rocksdb)
+    set(make_cmd ${CMAKE_COMMAND} --build <BINARY_DIR> --target rocksdb-shared)
 endif()
 
 ExternalProject_Add(rocksdb_ext
@@ -52,7 +52,7 @@ ExternalProject_Add(rocksdb_ext
     LOG_BUILD ON
 )
 
-add_library(RocksDB::RocksDB STATIC IMPORTED GLOBAL)
+add_library(RocksDB::RocksDB SHARED IMPORTED GLOBAL)
 add_dependencies(RocksDB::RocksDB rocksdb_ext)
 
 set_target_properties(RocksDB::RocksDB PROPERTIES

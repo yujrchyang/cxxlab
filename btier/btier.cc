@@ -41,6 +41,27 @@ struct BtierEngine::Impl {
 
     int recover_internal(const std::vector<JournalRecord> &records);
     std::vector<JournalRecord> build_checkpoint_state();
+
+    // put() helpers
+    struct PutWriteResult {
+        uint64_t target_extent_id;
+        uint32_t offset;
+        uint32_t size;
+        DiskLocation extent_loc;
+        bool new_extent_created;
+        KeyLocation old_kloc;
+        bool has_old;
+        uint32_t now;
+    };
+
+    int put_pre_transaction_extent(uint64_t extent_id, const DiskLocation &loc);
+    int put_allocate_new_extent(Tier tier, uint64_t size,
+                                uint64_t &extent_id, DiskLocation &loc);
+    int put_write_data(const std::string &key, const bufferlist &value,
+                       PutWriteResult &ctx);
+    int put_journal_transaction(const std::string &key, const PutWriteResult &ctx);
+    void put_cleanup_on_failure(const PutWriteResult &ctx);
+    void put_commit_memory_state(const std::string &key, const PutWriteResult &ctx);
 };
 
 BtierEngine::BtierEngine() : impl_(std::make_unique<Impl>()) {}
@@ -320,6 +341,164 @@ int BtierEngine::sync() {
     return 0;
 }
 
+int BtierEngine::Impl::put_pre_transaction_extent(uint64_t extent_id,
+                                                  const DiskLocation &loc) {
+    uint64_t txn = journal->begin_txn();
+    JournalRecord rec;
+    rec.op = OP_EXTENT_NEW;
+    rec.extent_id = extent_id;
+    rec.extent_loc = loc;
+    journal->append(txn, rec);
+    int r = journal->commit_txn(txn);
+    if (r < 0) {
+        extent_map->free(extent_id);
+        return r;
+    }
+    return 0;
+}
+
+int BtierEngine::Impl::put_allocate_new_extent(Tier tier, uint64_t size,
+                                               uint64_t &extent_id,
+                                               DiskLocation &loc) {
+    auto alloc = extent_map->allocate_extent(tier, size);
+    if (!alloc) return -ENOSPC;
+    extent_id = alloc->extent_id;
+    loc = alloc->location;
+    return put_pre_transaction_extent(extent_id, loc);
+}
+
+int BtierEngine::Impl::put_write_data(const std::string &key,
+                                      const bufferlist &value,
+                                      PutWriteResult &ctx) {
+    BlockDevice *dev;
+
+    if (ctx.size >= cfg.large_value_threshold) {
+        // Large value → dedicated extent
+        int r = put_allocate_new_extent(Tier::FAST,
+                                        ctx.size + ExtentHeader::HEADER_SIZE,
+                                        ctx.target_extent_id, ctx.extent_loc);
+        if (r < 0) return r;
+        ctx.new_extent_created = true;
+
+        ctx.offset = extent_map->append_slot(ctx.target_extent_id,
+                                             (uint32_t)ctx.size);
+        if (ctx.offset == UINT32_MAX) {
+            extent_map->free(ctx.target_extent_id);
+            return -EIO;
+        }
+
+        dev = (ctx.extent_loc.tier == Tier::FAST)
+            ? fast_dev.get()
+            : slow_dev.get();
+        r = dev->write(ctx.extent_loc.offset + ExtentHeader::HEADER_SIZE + ctx.offset,
+                       const_cast<bufferlist &>(value), true);
+        if (r < 0) {
+            extent_map->free(ctx.target_extent_id);
+            return r;
+        }
+    } else {
+        // Small value → pack into existing extent or create new
+        ctx.target_extent_id = extent_map->find_extent_with_space(
+            Tier::FAST, (uint32_t)ctx.size);
+        ctx.new_extent_created = false;
+
+        if (ctx.target_extent_id == UINT64_MAX) {
+            int r = put_allocate_new_extent(Tier::FAST, cfg.extent_size,
+                                            ctx.target_extent_id, ctx.extent_loc);
+            if (r < 0) return r;
+            ctx.new_extent_created = true;
+        } else {
+            auto loc = extent_map->get_location(ctx.target_extent_id);
+            if (!loc) return -EIO;
+            ctx.extent_loc = *loc;
+        }
+
+        // Reserve slot (bumps generation)
+        ctx.offset = extent_map->append_slot(ctx.target_extent_id,
+                                             (uint32_t)ctx.size);
+        if (ctx.offset == UINT32_MAX) {
+            if (ctx.new_extent_created) {
+                extent_map->free(ctx.target_extent_id);
+            }
+            // Retry once with a fresh extent
+            int r = put_allocate_new_extent(Tier::FAST, cfg.extent_size,
+                                            ctx.target_extent_id, ctx.extent_loc);
+            if (r < 0) return r;
+            ctx.new_extent_created = true;
+
+            ctx.offset = extent_map->append_slot(ctx.target_extent_id,
+                                                 (uint32_t)ctx.size);
+            if (ctx.offset == UINT32_MAX) {
+                extent_map->free(ctx.target_extent_id);
+                return -EIO;
+            }
+        }
+
+        dev = (ctx.extent_loc.tier == Tier::FAST)
+            ? fast_dev.get()
+            : slow_dev.get();
+        int r = dev->write(ctx.extent_loc.offset + ExtentHeader::HEADER_SIZE + ctx.offset,
+                           const_cast<bufferlist &>(value), true);
+        if (r < 0) {
+            if (ctx.new_extent_created) {
+                extent_map->free(ctx.target_extent_id);
+            } else {
+                extent_map->mark_dead_slot(ctx.target_extent_id,
+                                           (uint32_t)ctx.size);
+            }
+            return r;
+        }
+    }
+
+    return 0;
+}
+
+int BtierEngine::Impl::put_journal_transaction(const std::string &key,
+                                               const PutWriteResult &ctx) {
+    uint64_t txn_id = journal->begin_txn();
+
+    if (ctx.has_old) {
+        JournalRecord dead_rec;
+        dead_rec.op = OP_MARK_DEAD;
+        dead_rec.extent_id = ctx.old_kloc.extent_id;
+        dead_rec.dead_length = ctx.old_kloc.length;
+        journal->append(txn_id, dead_rec);
+    }
+
+    JournalRecord put_rec;
+    put_rec.op = OP_KEY_PUT;
+    put_rec.key = key;
+    put_rec.key_loc = {ctx.target_extent_id, ctx.offset, ctx.size};
+    journal->append(txn_id, put_rec);
+
+    return journal->commit_txn(txn_id);
+}
+
+void BtierEngine::Impl::put_cleanup_on_failure(const PutWriteResult &ctx) {
+    if (ctx.new_extent_created) {
+        extent_map->free(ctx.target_extent_id);
+    } else {
+        extent_map->mark_dead_slot(ctx.target_extent_id, ctx.size);
+    }
+}
+
+void BtierEngine::Impl::put_commit_memory_state(const std::string &key,
+                                                const PutWriteResult &ctx) {
+    KeyLocation new_kloc;
+    new_kloc.extent_id = ctx.target_extent_id;
+    new_kloc.offset = ctx.offset;
+    new_kloc.length = ctx.size;
+    uint64_t lba = ctx.extent_loc.offset + ExtentHeader::HEADER_SIZE + ctx.offset;
+    key_map->put(key, new_kloc, lba);
+
+    if (ctx.has_old) {
+        extent_map->mark_dead_slot(ctx.old_kloc.extent_id, ctx.old_kloc.length);
+        if (extent_map->get_live_bytes(ctx.old_kloc.extent_id) == 0) {
+            extent_map->free(ctx.old_kloc.extent_id);
+        }
+    }
+}
+
 int BtierEngine::put(const std::string &key, const bufferlist &value) {
     if (!impl_->initialized) return -EINVAL;
 
@@ -329,206 +508,33 @@ int BtierEngine::put(const std::string &key, const bufferlist &value) {
         impl_->journal->checkpoint(state);
     }
 
-    uint64_t size = value.length();
-    uint32_t now = (uint32_t)std::time(nullptr);
+    Impl::PutWriteResult ctx;
+    ctx.size = value.length();
+    ctx.now = (uint32_t)std::time(nullptr);
+    ctx.has_old = impl_->key_map->lookup(key, &ctx.old_kloc);
 
-    // ── Phase 1: Handle old key ──
-    KeyLocation old_kloc;
-    bool has_old = impl_->key_map->lookup(key, &old_kloc);
+    // Phase 1: Allocate space and write data
+    int r = impl_->put_write_data(key, value, ctx);
+    if (r < 0) return r;
 
-    // ── Phase 2: Allocate + write new data ──
-    uint64_t target_extent_id;
-    uint32_t offset;
-    DiskLocation extent_loc;
-    bool new_extent_created = false;
+    // Phase 2: Update metrics
+    impl_->extent_map->record_io(ctx.target_extent_id, IoOp::WRITE, ctx.now);
 
-    if (size >= impl_->cfg.large_value_threshold) {
-        // Large value → dedicated extent
-        auto alloc = impl_->extent_map->allocate_extent(
-            Tier::FAST, size + ExtentHeader::HEADER_SIZE);
-        if (!alloc) return -ENOSPC;
-        target_extent_id = alloc->extent_id;
-        extent_loc = alloc->location;
-        new_extent_created = true;
-
-        // Pre-transaction: record extent allocation BEFORE data write.
-        // On crash between here and the main transaction, recovery will
-        // create the extent entry but find no keys → free it (space reclaimed).
-        {
-            uint64_t pre_txn = impl_->journal->begin_txn();
-            JournalRecord new_rec;
-            new_rec.op = OP_EXTENT_NEW;
-            new_rec.extent_id = target_extent_id;
-            new_rec.extent_loc = extent_loc;
-            impl_->journal->append(pre_txn, new_rec);
-            int pr = impl_->journal->commit_txn(pre_txn);
-            if (pr < 0) {
-                impl_->extent_map->free(target_extent_id);
-                return pr;
-            }
-        }
-
-        // Reserve the slot (updates used_bytes/live_bytes + bumps gen)
-        offset = impl_->extent_map->append_slot(target_extent_id,
-                                                (uint32_t)size);
-        if (offset == UINT32_MAX) {
-            impl_->extent_map->free(target_extent_id);
-            return -EIO;
-        }
-
-        // Write value data to the correct device for the allocated tier
-        BlockDevice *write_dev = (extent_loc.tier == Tier::FAST)
-            ? impl_->fast_dev.get()
-            : impl_->slow_dev.get();
-        int r = write_dev->write(
-            extent_loc.offset + ExtentHeader::HEADER_SIZE + offset,
-            const_cast<bufferlist &>(value), true);
-        if (r < 0) {
-            impl_->extent_map->free(target_extent_id);
-            return r;
-        }
-    } else {
-        // Small value → pack into existing extent or create new
-        target_extent_id = impl_->extent_map->find_extent_with_space(
-            Tier::FAST, (uint32_t)size);
-        if (target_extent_id == UINT64_MAX) {
-            auto alloc = impl_->extent_map->allocate_extent(
-                Tier::FAST, impl_->cfg.extent_size);
-            if (!alloc) return -ENOSPC;
-            target_extent_id = alloc->extent_id;
-            extent_loc = alloc->location;
-            new_extent_created = true;
-
-            // Pre-transaction: record extent allocation BEFORE data write
-            {
-                uint64_t pre_txn = impl_->journal->begin_txn();
-                JournalRecord new_rec;
-                new_rec.op = OP_EXTENT_NEW;
-                new_rec.extent_id = target_extent_id;
-                new_rec.extent_loc = extent_loc;
-                impl_->journal->append(pre_txn, new_rec);
-                int pr = impl_->journal->commit_txn(pre_txn);
-                if (pr < 0) {
-                    impl_->extent_map->free(target_extent_id);
-                    return pr;
-                }
-            }
-        } else {
-            auto loc = impl_->extent_map->get_location(target_extent_id);
-            if (!loc) return -EIO;
-            extent_loc = *loc;
-        }
-
-        // Reserve slot (bumps generation)
-        offset = impl_->extent_map->append_slot(target_extent_id, (uint32_t)size);
-        if (offset == UINT32_MAX) {
-            if (new_extent_created) {
-                impl_->extent_map->free(target_extent_id);
-            }
-            // Retry once with a fresh extent
-            auto alloc = impl_->extent_map->allocate_extent(
-                Tier::FAST, impl_->cfg.extent_size);
-            if (!alloc) return -ENOSPC;
-            target_extent_id = alloc->extent_id;
-            extent_loc = alloc->location;
-            new_extent_created = true;
-
-            // Pre-transaction for the retry extent
-            {
-                uint64_t pre_txn = impl_->journal->begin_txn();
-                JournalRecord new_rec;
-                new_rec.op = OP_EXTENT_NEW;
-                new_rec.extent_id = target_extent_id;
-                new_rec.extent_loc = extent_loc;
-                impl_->journal->append(pre_txn, new_rec);
-                int pr = impl_->journal->commit_txn(pre_txn);
-                if (pr < 0) {
-                    impl_->extent_map->free(target_extent_id);
-                    return pr;
-                }
-            }
-
-            offset = impl_->extent_map->append_slot(target_extent_id, (uint32_t)size);
-            if (offset == UINT32_MAX) {
-                impl_->extent_map->free(target_extent_id);
-                return -EIO;
-            }
-        }
-
-        // Write value data
-        BlockDevice *dev = (extent_loc.tier == Tier::FAST)
-            ? impl_->fast_dev.get()
-            : impl_->slow_dev.get();
-        int r = dev->write(extent_loc.offset + ExtentHeader::HEADER_SIZE + offset,
-                           const_cast<bufferlist &>(value), true);
-        if (r < 0) {
-            if (new_extent_created) {
-                impl_->extent_map->free(target_extent_id);
-            } else {
-                impl_->extent_map->mark_dead_slot(target_extent_id, (uint32_t)size);
-            }
-            return r;
-        }
-    }
-
-    // ── Phase 3: Update metrics ──
-    impl_->extent_map->record_io(target_extent_id, IoOp::WRITE, now);
-
-    // ── Phase 4: Main journal transaction (key mapping only) ──
-    // OP_EXTENT_NEW was already committed in the pre-transaction above.
-    uint64_t txn_id = impl_->journal->begin_txn();
-
-    if (has_old) {
-        JournalRecord dead_rec;
-        dead_rec.op = OP_MARK_DEAD;
-        dead_rec.extent_id = old_kloc.extent_id;
-        dead_rec.dead_length = old_kloc.length;
-        impl_->journal->append(txn_id, dead_rec);
-    }
-
-    // Note: OP_EXTENT_NEW is NOT included here — it was pre-transactioned.
-    // This ensures that if a crash occurs between the pre-transaction and
-    // this main transaction, recovery will create the extent entry but
-    // find no keys for it → restore_extent_state will free it (space reclaimed).
-
-    JournalRecord put_rec;
-    put_rec.op = OP_KEY_PUT;
-    put_rec.key = key;
-    put_rec.key_loc = {target_extent_id, offset, (uint32_t)size};
-    impl_->journal->append(txn_id, put_rec);
-
-    int r = impl_->journal->commit_txn(txn_id);
+    // Phase 3: Journal transaction (key mapping)
+    r = impl_->put_journal_transaction(key, ctx);
     if (r < 0) {
-        if (new_extent_created) {
-            impl_->extent_map->free(target_extent_id);
-        } else {
-            impl_->extent_map->mark_dead_slot(target_extent_id, (uint32_t)size);
-        }
+        impl_->put_cleanup_on_failure(ctx);
         return r;
     }
 
-    // Trigger async checkpoint if journal usage >= 80%
+    // Phase 4: Trigger async checkpoint if journal usage >= 80%
     if (impl_->journal && impl_->journal->needs_checkpoint()) {
         auto state = impl_->build_checkpoint_state();
         impl_->journal->checkpoint(state);
     }
 
-    // ── Phase 5: Commit in-memory state ──
-    // Update KeyMap FIRST so concurrent readers can find the new location
-    // before the old extent is freed.
-    KeyLocation new_kloc;
-    new_kloc.extent_id = target_extent_id;
-    new_kloc.offset = offset;
-    new_kloc.length = (uint32_t)size;
-    uint64_t lba = extent_loc.offset + ExtentHeader::HEADER_SIZE + offset;
-    impl_->key_map->put(key, new_kloc, lba);
-
-    if (has_old) {
-        impl_->extent_map->mark_dead_slot(old_kloc.extent_id, old_kloc.length);
-        if (impl_->extent_map->get_live_bytes(old_kloc.extent_id) == 0) {
-            impl_->extent_map->free(old_kloc.extent_id);
-        }
-    }
+    // Phase 5: Commit in-memory state
+    impl_->put_commit_memory_state(key, ctx);
 
     return 0;
 }
@@ -649,25 +655,14 @@ std::vector<ScoredExtent> BtierEngine::run_scoring_pass() {
     uint32_t now = (uint32_t)std::time(nullptr);
 
     // ── Step 1: Randomness refresh ──
-    auto snapshot = impl_->extent_map->snapshot();
-    for (const auto &snap : snapshot) {
-        auto keys = impl_->key_map->keys_in_extent(snap.extent_id);
-        uint32_t extent_randomness = 0;
-        for (const auto &key : keys) {
-            if (impl_->key_map->get_consecutive_sequential(key) == 0) {
-                extent_randomness = 63;
-                break;
-            }
-        }
-        impl_->extent_map->set_randomness(snap.extent_id, extent_randomness);
-    }
+    impl_->extent_map->refresh_randomness(*impl_->key_map);
 
     // ── Step 2: Adapt weights based on FAST tier usage ──
     double watermark = impl_->extent_map->fast_watermark();
     impl_->scoring_engine->adapt_weights(watermark);
 
     // ── Step 3: Score all extents ──
-    snapshot = impl_->extent_map->snapshot();
+    auto snapshot = impl_->extent_map->snapshot();
     for (const auto &snap : snapshot) {
         float s = impl_->scoring_engine->score(
             snap.raw_metrics, snap.last_access_time, now);

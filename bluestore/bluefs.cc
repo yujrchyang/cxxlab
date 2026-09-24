@@ -21,17 +21,18 @@ BlueFS::BlueFS(const BlueFSConfig &cfg)
 BlueFS::~BlueFS() {
     umount(true);
     for (auto p : ioc_) {
-        if (p) p->aio_wait();
+        if (p) p->aio_wait();  // 等待 I/O 完成
     }
     for (auto p : bdev_) {
         if (p) {
             p->close();
-            delete p;
+            delete p;  // BlueFS 拥有，负责删除
         }
     }
     for (auto p : ioc_) {
-        delete p;
+        delete p;  // BlueFS 拥有，负责删除
     }
+    // 注意：alloc_ 已在 umount() -> _stop_alloc() 中清理
 }
 
 // =====================================================================
@@ -58,12 +59,12 @@ int BlueFS::add_block_device(unsigned id, const std::string &path, bool trim,
         b->discard(0, b->get_size());
     }
 
-    bdev_[id] = b.release();
-    ioc_[id] = new IOContext(nullptr);
+    bdev_[id] = b.release();           // 转移所有权到 BlueFS
+    ioc_[id] = new IOContext(nullptr); // BlueFS 拥有
 
     if (shared_alloc) {
         shared_alloc_ = shared_alloc;
-        alloc_[id] = shared_alloc->a;
+        alloc_[id] = shared_alloc->a;  // 非拥有：指向外部分配器，BlueFS 不删除
         shared_alloc_id_ = id;
     }
 
@@ -118,12 +119,12 @@ void BlueFS::_init_alloc() {
 
         if (alloc_[id]) {
             alloc_[id]->shutdown();
-            delete alloc_[id];
+            delete alloc_[id];  // 仅删除 BlueFS 拥有的分配器
             alloc_[id] = nullptr;
         }
 
         alloc_[id] = Allocator::create("avl", bdev_[id]->get_size(),
-                                       cfg_.alloc_size);
+                                       cfg_.alloc_size);  // BlueFS 拥有
         uint64_t total = _get_total(id);
         uint64_t skip = block_reserved_[id];
         if (id == BDEV_DB) {
@@ -139,10 +140,10 @@ void BlueFS::_stop_alloc() {
     for (auto &a : alloc_) {
         if (a) {
             if (shared_alloc_ && a == shared_alloc_->a) {
-                continue;
+                continue;  // 跳过：非拥有，由外部管理
             }
             a->shutdown();
-            delete a;
+            delete a;  // 仅删除 BlueFS 拥有的分配器
             a = nullptr;
         }
     }
@@ -222,6 +223,10 @@ BlueFS::FileRef BlueFS::_get_file(uint64_t ino) {
 
 int BlueFS::_allocate(uint8_t prefer_bdev, uint64_t len, uint64_t alloc_unit,
                       bluefs_fnode_t *node, uint64_t *hint) {
+    // 注意：prefer_bdev 可能是共享分配器对应的设备
+    // is_shared_alloc(prefer_bdev) 为 true 时，alloc_[prefer_bdev] 指向外部分配器
+    // 此方法只是使用分配器，不涉及所有权转移
+    
     if (alloc_unit == 0) {
         alloc_unit = alloc_size_[prefer_bdev];
         if (alloc_unit == 0) alloc_unit = cfg_.alloc_size;

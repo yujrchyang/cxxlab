@@ -81,18 +81,7 @@ struct MigrationEngine::Impl {
         extent_map->process_deferred_free();
 
         // ── Step 2: Randomness refresh ──
-        auto snapshot = extent_map->snapshot();
-        for (const auto &snap : snapshot) {
-            auto keys = key_map->keys_in_extent(snap.extent_id);
-            uint32_t extent_randomness = 0;
-            for (const auto &key : keys) {
-                if (key_map->get_consecutive_sequential(key) == 0) {
-                    extent_randomness = 63;
-                    break;
-                }
-            }
-            extent_map->set_randomness(snap.extent_id, extent_randomness);
-        }
+        extent_map->refresh_randomness(*key_map);
 
         // ── Step 3: Adapt weights based on FAST tier usage ──
         double watermark = extent_map->fast_watermark();
@@ -100,6 +89,7 @@ struct MigrationEngine::Impl {
 
         // ── Step 4: Score all extents + build migration queue ──
         uint32_t now = (uint32_t)std::time(nullptr);
+        auto snapshot = extent_map->snapshot();
         std::vector<std::pair<uint64_t, float>> scored;
 
         for (const auto &snap : snapshot) {

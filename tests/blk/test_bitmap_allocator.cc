@@ -9,6 +9,7 @@
 #include "blk/bitmap_allocator.h"
 #include "blk/extent_types.h"
 #include "common/intarith.h"
+#include "common/interval_set.h"
 
 using namespace TOPNSPC;
 

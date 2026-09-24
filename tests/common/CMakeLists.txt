@@ -172,3 +172,12 @@ target_link_libraries(test_uuid
         GTest::gtest_main
 )
 add_test(NAME test_uuid COMMAND test_uuid)
+
+add_executable(test_interval_set test_interval_set.cc)
+target_include_directories(test_interval_set PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_interval_set
+    PRIVATE
+        common
+        GTest::gtest_main
+)
+add_test(NAME test_interval_set COMMAND test_interval_set)

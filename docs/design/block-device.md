@@ -4,7 +4,7 @@
 
 ## 1. 概述
 
-`blk` 模块为 Linux 上的直接 I/O 提供可移植的块设备抽象。它封装了原始块设备（如 NVMe、SSD），基于 `libaio` 实现了同步和异步读写接口。同时提供内存级空间分配器（Avl/Bitmap/Hybrid Allocator）和共享类型（`pextent_t`、`interval_set`）。
+`blk` 模块为 Linux 上的直接 I/O 提供可移植的块设备抽象。它封装了原始块设备（如 NVMe、SSD），基于 `libaio` 实现了同步和异步读写接口。同时提供内存级空间分配器（Avl/Bitmap/Hybrid Allocator）和共享类型（`pextent_t`）；`interval_set` 位于 `common/` 模块。
 
 ## 2. 需求分析
 
@@ -192,7 +192,7 @@ _aio_thread (后台轮询循环, 50ms 间隔)
 
 ### 4.6 extent_types.h
 
-blk 模块的共享类型头文件，定义被 BlockDevice、Allocator、BlueStore、BTier 共同使用的物理 extent 和区间集合类型：
+blk 模块的共享类型头文件，定义被 BlockDevice、Allocator、BlueStore、BTier 共同使用的物理 extent 类型：
 
 ```cpp
 struct pextent_t {
@@ -200,12 +200,9 @@ struct pextent_t {
     uint32_t length = 0;
 };
 using PExtentVector = std::vector<pextent_t>;
-
-template <typename T>
-class interval_set { /* ... */ };
 ```
 
-`pextent_t` 表示一个物理设备的 (offset, length) 区间，`PExtentVector` 是 `allocate()` 的返回类型。`interval_set` 基于 `std::map<T, T>`（key=offset, value=length），`insert` 时自动合并相邻和重叠区间，用于 Allocator `release()` 接口和 BlueStore `txc->allocated` / `txc->released`。
+`pextent_t` 表示一个物理设备的 (offset, length) 区间，`PExtentVector` 是 `allocate()` 的返回类型。`interval_set` 已提取到 `common/interval_set.h`，成为独立可测试模块，基于 `std::map<T, T>`（key=offset, value=length），`insert` 时自动合并相邻和重叠区间，用于 Allocator `release()` 接口和 BlueStore `txc->allocated` / `txc->released`。
 
 ## 5. I/O 生命周期
 
@@ -312,7 +309,7 @@ AIO 完成线程的完整流程见 §4.2。
 | `kernel_device.h/cc` | `KernelDevice` 实现 |
 | `io_context.h/cc` | `IOContext` — 进行中 IO 跟踪器 |
 | `aio.h/cc` | `aio_t`（单次操作）+ `aio_queue_t`（libaio 队列） |
-| `extent_types.h` | `pextent_t`、`PExtentVector`、`interval_set` 共享类型 |
+| `extent_types.h` | `pextent_t`、`PExtentVector` 共享类型 |
 
 ## 10. 参考
 
@@ -324,4 +321,5 @@ AIO 完成线程的完整流程见 §4.2。
 - 本项目 `blk/kernel_device.h`: KernelDevice 实现
 - 本项目 `blk/aio.h`: aio_t + aio_queue_t
 - 本项目 `blk/io_context.h`: IOContext
-- 本项目 `blk/extent_types.h`: pextent_t / PExtentVector / interval_set
+- 本项目 `blk/extent_types.h`: pextent_t / PExtentVector
+- 本项目 `common/interval_set.h`: interval_set

@@ -32,6 +32,11 @@ option(EXAMPLE "Build and run examples" ON)
 # --- System dependencies (Boost, fmt, ...) ---
 include(FindDependencies)
 
+# --- RPATH configuration ---
+set(CMAKE_INSTALL_RPATH "$ORIGIN/../lib/cxxlab-thirdparty")
+set(CMAKE_BUILD_WITH_INSTALL_RPATH FALSE)
+set(CMAKE_INSTALL_RPATH_USE_LINK_PATH TRUE)
+
 # --- Third-party libraries (Git Submodules) ---
 include(BuildGoogleTest)
 include(BuildSpdlog)

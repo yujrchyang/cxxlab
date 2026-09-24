@@ -1,5 +1,6 @@
-# GoogleTest - only when TEST is ON
+# GoogleTest - shared library, only when TEST is ON
 if(TEST)
+    set(BUILD_SHARED_LIBS ON CACHE BOOL "" FORCE)
     set(INSTALL_GTEST OFF CACHE BOOL "" FORCE)
     set(gtest_force_shared_crt ON CACHE BOOL "" FORCE)
 

@@ -1,4 +1,4 @@
-add_library(bluestore STATIC
+add_library(bluestore SHARED
     freelist_manager.cc
     bitmap_freelist_manager.cc
     bluefs.cc
@@ -16,6 +16,6 @@ target_link_libraries(bluestore PUBLIC
     kv
     blk
 )
-target_link_libraries(bluestore PUBLIC
+target_link_libraries(bluestore PRIVATE
     RocksDB::RocksDB
 )

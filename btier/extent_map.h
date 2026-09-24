@@ -17,6 +17,7 @@
 namespace TOPNSPC::btier {
 
 class BtierConfig;
+class KeyMap;
 
 // ── ExtentEntry (held via shared_ptr in the map) ────────────────
 struct ExtentEntry {
@@ -50,6 +51,7 @@ public:
     uint64_t get_raw_metrics(uint64_t extent_id) const;
     void record_io(uint64_t extent_id, IoOp op, uint32_t current_time);
     void set_randomness(uint64_t extent_id, uint32_t randomness);
+    void refresh_randomness(const KeyMap &key_map);
 
     // ── Multi-key packing ────────────────────────────────────────
     uint64_t find_extent_with_space(Tier tier, uint32_t needed_bytes) const;

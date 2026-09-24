@@ -203,20 +203,17 @@ if (mirror) {
 
 ## 10. 依赖与封装策略
 
-### 10.1 RocksDB 依赖泄漏
+### 10.1 RocksDB 依赖隔离
 
-`BlueRocksEnv` 继承 `rocksdb::EnvWrapper`，导致 `blue_rocks_env.h` 必须 `#include "rocksdb/env.h"`。`bluestore` 库因此将 `RocksDB::RocksDB` 设为 PUBLIC 链接——所有链接 `libbluestore.a` 的目标都传递性依赖 RocksDB 头文件。
+`BlueRocksEnv` 继承 `rocksdb::EnvWrapper`，需要 RocksDB 头文件。cxxlab 通过以下方式隔离 RocksDB 依赖：
 
-这与 `kv` 库形成对比：`kv` 库将 RocksDB 设为 PRIVATE（`kv/CMakeLists.txt:13`），因为 `key_value_db.h` 抽象基类不暴露任何 RocksDB 类型。
+- `bluestore` 编译为动态库（`libbluestore.so`），将 `RocksDB::RocksDB` 设为 PRIVATE 链接
+- `blue_rocks_env.h` 公开继承 `rocksdb::EnvWrapper` 并直接 `#include "rocksdb/env.h"`，头文件层面暴露 RocksDB 类型；但 CMake 链接层面 `RocksDB::RocksDB` 设为 PRIVATE，不向下游传递
+- 链接 `bluestore` 的目标无需链接 RocksDB，除非直接使用 `BlueRocksEnv`
 
-替代方案（未采用）：
+直接使用 `BlueRocksEnv` 的目标（如 `test_blue_rocks_env`）需自行链接 `RocksDB::RocksDB` 并 include `rocksdb/env.h`。
 
-| 方案 | 优势 | 劣势 | 未采用原因 |
-| --- | --- | --- | --- |
-| PIMPL 模式 | 隐藏 RocksDB 头文件 | 增加间接调用开销；需拆分 `BlueRocksEnv` 接口与实现 | BlueRocksEnv 仅被 BlueStore 使用，无多个消费者 |
-| 独立 BlueRocksEnv `.so` | 隔离 RocksDB 依赖 | 增加构建复杂度；需处理符号可见性 | 当前 BlueRocksEnv 与 BlueStore 紧耦合 |
-
-当前决策：保持 PUBLIC 依赖，在 [overview.md](overview.md) §9.2 (ADR-11) 中记录权衡。未来若有第三个消费者（非 BlueStore）需要使用 BlueRocksEnv，应重新评估 PIMPL 或独立库方案。
+这与 `kv` 库的策略一致：`kv` 同样将 RocksDB 设为 PRIVATE（`kv/CMakeLists.txt:13`），因为 `key_value_db.h` 抽象基类不暴露任何 RocksDB 类型。
 
 ### 10.2 错误处理边界
 

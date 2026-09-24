@@ -424,9 +424,9 @@ RFC 4122 version 4 UUID:
 
 > `p2align` 等函数要求 `align` 为 2 的幂，使用位运算而非取模，性能更优。非 2 的幂对齐使用 `round_up_to` / `round_down_to`。
 
-### 3.8 interval\_set (`blk/extent_types.h`)
+### 3.8 interval\_set (`common/interval_set.h`)
 
-> 注意： `interval_set` 定义在 `blk/extent_types.h` 而非 `common/`，因为它是空间管理的核心类型，与 `pextent_t` 紧密关联。
+> `interval_set` 最初定义在 `blk/extent_types.h` 中，后提取为独立模块 `common/interval_set.h`，成为独立可测试的基础数据结构。提取过程中发现并修复了 `insert()` 中的合并 bug：当前驱区间完全包含新插入区间时（如 `[0, 20)` 包含 `[5, 10)`），原实现错误地将前驱截断而非保持完整。
 
 ```cpp
 template <typename T>
@@ -436,10 +436,11 @@ class interval_set {
     bool empty() const;
     T range_start() const;
     T range_end() const;
+    void insert(const interval_set &other);  // 合并两个集合
 };
 ```
 
-基于 `std::map<T, T>`（key=offset, value=length），`insert` 时自动合并相邻和重叠区间。用于 Allocator `release()` 接口和 BlueStore `txc->allocated` / `txc->released`。
+基于 `std::map<T, T>`（key=offset, value=length），`insert` 时自动合并相邻和重叠区间。用于 Allocator `release()` 接口和 BlueStore `txc->allocated` / `txc->released`。独立的 25 个单元测试覆盖了所有边界条件（相邻合并、重叠合并、包含合并、分割删除等）。
 
 ### 3.9 其他工具
 
@@ -556,4 +557,5 @@ target_compile_definitions(common PUBLIC HAVE_ISA_L=1)
 - 本项目 `common/buffer.h`: bufferlist 定义
 - 本项目 `common/denc.h`: DENC 序列化框架
 - 本项目 `common/intarith.h`: 数学工具函数
-- 本项目 `blk/extent_types.h`: `interval_set` / `pextent_t` 定义
+- 本项目 `blk/extent_types.h`: `pextent_t` / `PExtentVector` 定义
+- 本项目 `common/interval_set.h`: `interval_set` 定义

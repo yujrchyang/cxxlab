@@ -6,6 +6,7 @@
 #include <string_view>
 
 #include "blk/extent_types.h"
+#include "common/interval_set.h"
 
 namespace TOPNSPC {
 

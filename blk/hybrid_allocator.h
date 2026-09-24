@@ -4,6 +4,7 @@
 
 #include "blk/avl_allocator.h"
 #include "blk/bitmap_allocator.h"
+#include "common/interval_set.h"
 
 namespace TOPNSPC {
 

@@ -196,6 +196,7 @@ public:
     // 无锁指标更新 (CAS，不 bump generation)
     void record_io(uint64_t extent_id, IoOp op, uint32_t now);
     void set_randomness(uint64_t extent_id, uint32_t randomness);
+    void refresh_randomness(const KeyMap &key_map);
 
     // 多键打包
     uint64_t find_extent_with_space(Tier tier, uint32_t needed_bytes) const;
@@ -373,7 +374,7 @@ put(key, value):
 
 ### 4.2 Per-Key Stride 随机性检测
 
-每次写入键 K 时，在 KeyMap 中更新 `last_lba` 和 `consecutive_sequential` 计数器。评分前，MigrationEngine 遍历所有 extent，从 KeyMap 的 per-key stride 计算 per-extent randomness，通过 `set_randomness()` 写入 ExtentMetrics（CAS，不 bump generation）。
+每次写入键 K 时，在 KeyMap 中更新 `last_lba` 和 `consecutive_sequential` 计数器。评分前，`ExtentMap::refresh_randomness()` 遍历所有 extent，从 KeyMap 的 per-key stride 计算 per-extent randomness，通过 `set_randomness()` 写入 ExtentMetrics（CAS，不 bump generation）。
 
 多键正确性：Key A（顺序，consecutive=10）和 Key B（随机，consecutive=0）共享 extent E。per-extent stride 会平均为"部分顺序" → 对 Key B 的假阴性。per-key stride 正确识别 Key B 为随机 → extent E 标记为随机 → promote 到 FAST。
 

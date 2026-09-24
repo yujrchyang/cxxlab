@@ -65,14 +65,14 @@ common  ← 基础库 (bufferlist, denc, crc32, uuid, intarith, ...)
 | `common` | — | — | libcommon.so |
 | `blk` | common, aio | — | libblk.so |
 | `kv` | common | RocksDB | libkv.so |
-| `bluestore` | common, kv, blk, RocksDB | — | libbluestore.a |
+| `bluestore` | common, kv, blk | RocksDB | libbluestore.so |
 | `btier` | common, blk | — | libbtier.so |
 
 > bluestore 不依赖 btier，btier 不依赖 bluestore/kv。两者是平行的存储引擎。
 >
-> RocksDB 依赖说明： `kv` 库将 RocksDB 设为 PRIVATE（仅 RocksDBStore 实现内部使用，头文件不暴露 RocksDB 类型）。`bluestore` 库将 RocksDB 设为 PUBLIC，因为 `blue_rocks_env.h` 的 `BlueRocksEnv` 继承 `rocksdb::EnvWrapper`，RocksDB 头文件通过公共头文件传递给所有链接 bluestore 的目标。
+> RocksDB 依赖说明： `kv` 和 `bluestore` 库均将 RocksDB 设为 PRIVATE。`kv` 仅 `RocksDBStore` 实现内部使用 RocksDB。`bluestore` 仅 `BlueRocksEnv` 实现内部使用 RocksDB，CMake 链接层面将 `RocksDB::RocksDB` 设为 PRIVATE，不向下游 target 传递链接依赖；但 `blue_rocks_env.h` 公开继承 `rocksdb::EnvWrapper` 并直接引入 RocksDB 头文件，头文件层面仍暴露 RocksDB 类型。
 >
-> FreelistManager → blk 依赖：FreelistManager 编译在 `bluestore` 静态库中，通过 `bluestore` PUBLIC 链接 `blk` 获取 Allocator 接口和 `pextent_t`/`interval_set` 类型（`blk/extent_types.h`）。
+> FreelistManager → blk 依赖：FreelistManager 编译在 `bluestore` 动态库中，通过 `bluestore` PUBLIC 链接 `blk` 获取 Allocator 接口和 `pextent_t`/`interval_set` 类型（`blk/extent_types.h`）。
 
 ## 3. 模块职责
 
@@ -177,31 +177,28 @@ BTier:      bdev->open() → alloc->create() → Journal::recover()
 | ADR-07 | BlueFS 使用 AvlAllocator 而非 BitmapAllocator | 已采纳 | [bluefs.md](bluefs.md) §7.2 |
 | ADR-08 | Allocator 从 `bluestore/` 迁移到 `blk/`（Phase 0 重构） | 已采纳 | [allocator.md](allocator.md) §5.4 |
 | ADR-09 | 不引入统一存储引擎抽象接口 | 已采纳 | — |
-| ADR-10 | BlueFS 编译在 `bluestore` 静态库中，不拆为独立 `.so` | 已采纳 | 见下方 §9 库边界决策 |
-| ADR-11 | `bluestore` 将 RocksDB 设为 PUBLIC 依赖 | 已采纳 | 见下方 §9 库边界决策 |
+| ADR-10 | BlueFS 编译在 `bluestore` 动态库中，不拆为独立 `.so` | 已采纳 | 见下方 §9 库边界决策 |
+| ADR-11 | `bluestore` 将 RocksDB 设为 PRIVATE 依赖 | 已采纳 | 见下方 §9 库边界决策 |
 
 ## 9. 库边界决策
 
 ### 9.1 BlueFS 未拆为独立 `.so` (ADR-10)
 
-BlueFS、BlueRocksEnv、FreelistManager 三个子系统编译在 `libbluestore.a`（STATIC）中。未拆分的原因：
+BlueFS、BlueRocksEnv、FreelistManager 三个子系统编译在 `libbluestore.so`（SHARED）中。未拆分的原因：
 
 - BlueFS 与 BlueStore 共享 Allocator（`bluefs_shared_alloc_context_t`），拆分后需跨库传递 Allocator 指针，增加接口复杂度
 - BlueRocksEnv 依赖 BlueFS，BlueStore 依赖两者，当前为紧耦合的单一部署单元
-- 静态库避免 `.so` 符号导出/可见性问题
+- 动态库（`.so`）便于与其他模块统一链接，避免静态库的符号重复问题
 
 未来拆分触发条件：若 BTier 或其他引擎需要复用 BlueFS（例如将 BTier journal 放在 BlueFS 上），应将 BlueFS 拆为独立 `libbluefs.so`，BlueStore 和 BTier 分别链接。
 
-### 9.2 RocksDB 依赖泄漏 (ADR-11)
+### 9.2 RocksDB 依赖隔离 (ADR-11)
 
-`bluestore` 库将 `RocksDB::RocksDB` 设为 PUBLIC，因为 `BlueRocksEnv` 继承 `rocksdb::EnvWrapper`，RocksDB 头文件通过 `blue_rocks_env.h` 传递给所有链接者。
+`bluestore` 库将 `RocksDB::RocksDB` 设为 PRIVATE，与 `kv` 库保持一致。`BlueRocksEnv` 公开继承 `rocksdb::EnvWrapper` 并在 `blue_rocks_env.h` 中直接引入 RocksDB 头文件，因此头文件层面暴露 RocksDB 类型；但 CMake 链接层面不向下游 target 传递 `RocksDB::RocksDB` 链接依赖。
 
-权衡：与 `kv` 库（RocksDB 为 PRIVATE）不同，bluestore 无法完全隔离 RocksDB。替代方案：
+直接使用 `BlueRocksEnv` 的目标（如 `test_blue_rocks_env`）需自行链接 `RocksDB::RocksDB` 并 include `rocksdb/env.h`。
 
-1. PIMPL 模式：在 `blue_rocks_env.h` 中用前置声明隐藏 `rocksdb::EnvWrapper`，仅在 `.cc` 中继承——可行但增加间接调用开销
-2. 独立 BlueRocksEnv 库：将 BlueRocksEnv 编译为独立 `.so`，bluestore 仅链接而不暴露 RocksDB 头文件——当前未采用，因 BlueRocksEnv 仅被 BlueStore 使用
-
-当前决策：保持 PUBLIC，在 ADR 中记录依赖泄漏的权衡。详见 [blue-rocks-env.md](blue-rocks-env.md) §10。
+详见 [blue-rocks-env.md](blue-rocks-env.md) §10。
 
 ### 9.3 不引入统一存储引擎接口 (ADR-09)
 

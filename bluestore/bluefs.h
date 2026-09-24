@@ -229,14 +229,23 @@ public:
 private:
     BlueFSConfig cfg_;
 
-    // 设备
+    // 设备管理
+    // 所有权说明：
+    // - bdev_[id]: BlueFS 拥有，通过 add_block_device() 创建，析构时删除
+    // - ioc_[id]: BlueFS 拥有，与 bdev_ 对应，析构时删除
+    // - alloc_[id]: 分两种情况
+    //   * 普通分配器: BlueFS 拥有，通过 Allocator::create() 创建
+    //   * 共享分配器 (is_shared_alloc(id) == true): 非拥有，指向外部对象
+    //     (通常是 BlueStore 的分配器)，由外部管理生命周期
     std::vector<BlockDevice *> bdev_;
     std::vector<IOContext *> ioc_;
     std::vector<uint64_t> block_reserved_;
     std::vector<Allocator *> alloc_;
     std::vector<uint64_t> alloc_size_;
 
-    // 共享分配
+    // 共享分配上下文
+    // 指向外部分配器（如 BlueStore 的分配器），BlueFS 只是使用者，不拥有
+    // 当 alloc_[id] 指向 shared_alloc_->a 时，BlueFS 不应删除该分配器
     static constexpr unsigned NO_SHARED = unsigned(-1);
     bluefs_shared_alloc_context_t *shared_alloc_ = nullptr;
     unsigned shared_alloc_id_ = NO_SHARED;

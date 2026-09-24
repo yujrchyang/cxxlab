@@ -46,6 +46,8 @@ target_link_libraries(test_blue_rocks_env
     PRIVATE
         bluestore
         blk
+        kv
+        RocksDB::RocksDB
         cxxlab_test_helpers
         GTest::gtest_main
 )

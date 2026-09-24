@@ -169,7 +169,7 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 - Iterator bounds two-layer separation: `WholeSpaceIteratorImpl` stores `const std::string*`, backend converts to native type (`rocksdb::Slice*`) at seek time
 - BitmapFreelistManager: `create()` allocates block 0 at mkfs time (caller must not double-allocate)
 - Bitmap key encoding: 8 bytes big-endian uint64_t (memcmp-compatible, matches Ceph `_key_encode_u64`)
-- BitmapFreelistManager links as STATIC library `libbluestore.a`
+- BitmapFreelistManager compiles into `libbluestore.so` (SHARED)
 - bluestore/ subdirectory added to root CMakeLists.txt
 - Allocator::create() type string `"stupid"` maps to AvlAllocator (not the original Ceph StupidAllocator)
 - HybridAllocator allocation strategy: always try AVL first, bitmap as fallback (simplified from Ceph's conditional strategy)
@@ -251,7 +251,7 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 - `kv/CMakeLists.txt`: builds libkv.so (SHARED), links common (PUBLIC) + RocksDB::RocksDB (PRIVATE), uses `-Wno-unused-parameter`
 - `bluestore/freelist_manager.h`: FreelistManager abstract base
 - `bluestore/bitmap_freelist_manager.h` / `bluestore/bitmap_freelist_manager.cc`: BitmapFreelistManager implementation
-- `bluestore/CMakeLists.txt`: builds libbluestore.a (STATIC)
+- `bluestore/CMakeLists.txt`: builds libbluestore.so (SHARED), links common (PUBLIC) + kv (PUBLIC) + blk (PUBLIC) + RocksDB (PRIVATE)
 - `bluestore/allocator.h` / `bluestore/allocator.cc`: Allocator abstract base + factory
 - `bluestore/avl_allocator.h` / `bluestore/avl_allocator.cc`: AvlAllocator (interval-tree)
 - `bluestore/bitmap_allocator.h` / `bluestore/bitmap_allocator.cc`: BitmapAllocator (2-level bitmap)

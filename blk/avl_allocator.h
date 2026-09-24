@@ -6,6 +6,7 @@
 #include <boost/intrusive/avl_set.hpp>
 
 #include "blk/allocator.h"
+#include "common/interval_set.h"
 
 namespace TOPNSPC {
 

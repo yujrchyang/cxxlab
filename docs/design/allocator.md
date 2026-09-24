@@ -470,7 +470,8 @@ mkfs 时：
 Allocator 位于 `blk/` 目录，依赖：
 
 - `common` 库：`bufferlist`、`cxxlab_assert`、`intarith` 工具函数
-- `blk/extent_types.h`：`pextent_t`、`PExtentVector`、`interval_set`
+- `blk/extent_types.h`：`pextent_t`、`PExtentVector`
+- `common/interval_set.h`：`interval_set`
 - 无 `kv` / `rocksdb` 依赖（只操作内存）
 
 ## 8. 文件
@@ -494,4 +495,5 @@ Allocator 位于 `blk/` 目录，依赖：
 - 本项目 [docs/design/block-device.md](block-device.md): 块设备抽象层
 - 本项目 [docs/design/freelist-manager.md](freelist-manager.md): FreelistManager 设计
 - 本项目 `blk/allocator.h`: Allocator 抽象接口
-- 本项目 `blk/extent_types.h`: pextent_t / PExtentVector / interval_set
+- 本项目 `blk/extent_types.h`: pextent_t / PExtentVector
+- 本项目 `common/interval_set.h`: interval_set

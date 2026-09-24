@@ -19,9 +19,7 @@ target_link_libraries(common PUBLIC
     isal
 )
 target_link_libraries(common PRIVATE
-    -Wl,--whole-archive
     spdlog::spdlog
-    -Wl,--no-whole-archive
     fmt::fmt
     pthread
 )
