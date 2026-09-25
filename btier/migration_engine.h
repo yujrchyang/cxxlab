@@ -66,14 +66,8 @@ public:
 
     size_t pending() const;
 
-    struct Stats {
-        uint64_t promotions_committed = 0;
-        uint64_t demotions_committed = 0;
-        uint64_t compactions_committed = 0;
-        uint64_t interruptions = 0;
-        uint64_t io_errors = 0;
-    };
-    Stats get_stats() const;
+    using Stats = MigrationStats;
+    MigrationStats get_stats() const;
 
     // Run a single cycle synchronously (for testing without background thread).
     void run_cycle();

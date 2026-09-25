@@ -182,9 +182,7 @@ public:
     virtual Transaction get_transaction() = 0;
     virtual int submit_transaction(Transaction t) = 0;
 
-    virtual int submit_transaction_sync(Transaction t) {
-        return submit_transaction(t);
-    }
+    virtual int submit_transaction_sync(Transaction t) = 0;
 
     // ── Point Read ──────────────────────────────────────────
     virtual int get(const std::string &prefix,
@@ -240,6 +238,21 @@ public:
     const std::vector<std::pair<std::string,
                                 std::shared_ptr<MergeOperator>>> &
     get_merge_ops() const { return merge_ops_; }
+
+    // ── Key encoding ───────────────────────────────────────
+    // Ceph-compatible format: prefix + '\0' + inner_key
+    static std::string encode_key(const std::string &prefix,
+                                  const std::string &key) {
+        return prefix + '\0' + key;
+    }
+    static std::pair<std::string, std::string> decode_key(
+        const std::string &full_key) {
+        auto pos = full_key.find('\0');
+        if (pos == std::string::npos)
+            return {full_key, {}};
+        return {full_key.substr(0, pos),
+                full_key.substr(pos + 1)};
+    }
 
 protected:
     /// Wrap a WholeSpaceIterator into a prefix-filtered Iterator.

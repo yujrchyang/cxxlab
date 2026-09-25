@@ -264,6 +264,10 @@ int MemDB::submit_transaction(Transaction t) {
     return 0;
 }
 
+int MemDB::submit_transaction_sync(Transaction t) {
+    return submit_transaction(std::move(t));
+}
+
 int MemDB::get(
     const std::string &prefix,
     const std::set<std::string> &keys,
@@ -304,19 +308,6 @@ uint64_t MemDB::get_estimated_size(
 }
 
 // ── Private helpers ────────────────────────────────────────────────
-
-std::string MemDB::encode_key(const std::string &prefix,
-                              const std::string &key) const {
-    return prefix + '\0' + key;
-}
-
-std::pair<std::string, std::string> MemDB::decode_key(
-    const std::string &full_key) {
-    auto pos = full_key.find('\0');
-    if (pos == std::string::npos)
-        return {full_key, {}};
-    return {full_key.substr(0, pos), full_key.substr(pos + 1)};
-}
 
 void MemDB::_set_key(const std::string &full_key,
                      const bufferlist &bl) {

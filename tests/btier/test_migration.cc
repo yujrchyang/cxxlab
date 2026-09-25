@@ -374,9 +374,9 @@ TEST_F(BtierMigrationTest, StatsIncludeMigrationCounters) {
     EXPECT_EQ(stats.num_keys, 5u);
     EXPECT_GE(stats.num_extents, 1u);
     // Migration stats should be zero initially
-    EXPECT_EQ(stats.promotions_committed, 0u);
-    EXPECT_EQ(stats.demotions_committed, 0u);
-    EXPECT_EQ(stats.compactions_committed, 0u);
+    EXPECT_EQ(stats.migration.promotions_committed, 0u);
+    EXPECT_EQ(stats.migration.demotions_committed, 0u);
+    EXPECT_EQ(stats.migration.compactions_committed, 0u);
 
     engine.shutdown();
 }

@@ -156,40 +156,29 @@ int BtierEngine::recover() {
 
 int BtierEngine::Impl::recover_internal(
     const std::vector<JournalRecord> &records) {
-    // Replay OP_EXTENT_NEW → create ExtentEntry
+    // Single-pass replay. Records are in write order, so OP_EXTENT_NEW
+    // always precedes its associated OP_KEY_PUT for the same extent.
     for (const auto &rec : records) {
-        if (rec.op == OP_EXTENT_NEW) {
+        switch (rec.op) {
+        case OP_EXTENT_NEW:
             extent_map->create_entry_from_journal(rec.extent_id,
                                                   rec.extent_loc);
-        }
-    }
-
-    // Replay OP_KEY_PUT → populate KeyMap
-    for (const auto &rec : records) {
-        if (rec.op == OP_KEY_PUT) {
+            break;
+        case OP_KEY_PUT:
             key_map->put(rec.key, rec.key_loc, 0);
-        }
-    }
-
-    // Replay OP_KEY_DEL → remove from KeyMap
-    for (const auto &rec : records) {
-        if (rec.op == OP_KEY_DEL) {
+            break;
+        case OP_KEY_DEL:
             key_map->erase(rec.key);
-        }
-    }
-
-    // Replay OP_MARK_DEAD → update live_bytes
-    for (const auto &rec : records) {
-        if (rec.op == OP_MARK_DEAD) {
+            break;
+        case OP_MARK_DEAD:
             extent_map->mark_dead_slot(rec.extent_id, rec.dead_length);
-        }
-    }
-
-    // Replay OP_EXTENT_FREE → remove ExtentEntry
-    // (still replayed for backward compatibility with old journals)
-    for (const auto &rec : records) {
-        if (rec.op == OP_EXTENT_FREE) {
+            break;
+        case OP_EXTENT_FREE:
+            // Still replayed for backward compatibility with old journals
             extent_map->free(rec.extent_id);
+            break;
+        default:
+            break;
         }
     }
 
@@ -623,12 +612,7 @@ BtierEngine::Stats BtierEngine::get_stats() const {
 
     if (impl_->migration_engine) {
         s.migrations_pending = impl_->migration_engine->pending();
-        auto ms = impl_->migration_engine->get_stats();
-        s.promotions_committed = ms.promotions_committed;
-        s.demotions_committed = ms.demotions_committed;
-        s.compactions_committed = ms.compactions_committed;
-        s.interruptions = ms.interruptions;
-        s.io_errors = ms.io_errors;
+        s.migration = impl_->migration_engine->get_stats();
     }
 
     return s;
@@ -691,17 +675,10 @@ void BtierEngine::run_migration_cycle() {
     impl_->migration_engine->run_cycle();
 }
 
-BtierEngine::MigrationStats BtierEngine::get_migration_stats() const {
-    MigrationStats s;
+MigrationStats BtierEngine::get_migration_stats() const {
     if (!impl_->initialized || !impl_->migration_engine)
-        return s;
-    auto ms = impl_->migration_engine->get_stats();
-    s.promotions_committed = ms.promotions_committed;
-    s.demotions_committed = ms.demotions_committed;
-    s.compactions_committed = ms.compactions_committed;
-    s.interruptions = ms.interruptions;
-    s.io_errors = ms.io_errors;
-    return s;
+        return {};
+    return impl_->migration_engine->get_stats();
 }
 
 }  // namespace TOPNSPC::btier

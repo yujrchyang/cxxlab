@@ -60,13 +60,7 @@ public:
     void run_migration_cycle();
 
     // Get migration engine stats (for testing).
-    struct MigrationStats {
-        uint64_t promotions_committed = 0;
-        uint64_t demotions_committed = 0;
-        uint64_t compactions_committed = 0;
-        uint64_t interruptions = 0;
-        uint64_t io_errors = 0;
-    };
+    using MigrationStats = ::TOPNSPC::btier::MigrationStats;
     MigrationStats get_migration_stats() const;
 
     struct Stats {
@@ -77,11 +71,7 @@ public:
         double fast_watermark = 0.0;
         uint64_t journal_bytes = 0;
         uint64_t migrations_pending = 0;
-        uint64_t promotions_committed = 0;
-        uint64_t demotions_committed = 0;
-        uint64_t compactions_committed = 0;
-        uint64_t interruptions = 0;
-        uint64_t io_errors = 0;
+        MigrationStats migration;
     };
     Stats get_stats() const;
 

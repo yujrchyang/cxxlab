@@ -365,3 +365,35 @@ TEST_F(RocksDBStoreTest, EstimatedSize) {
 }
 
 }  // namespace
+
+// ── Key encoding roundtrip (static, no DB needed) ─────────────
+
+TEST(KeyValueDBEncodeKey, Roundtrip) {
+    auto encoded = KeyValueDB::encode_key("S", "min_alloc_size");
+    EXPECT_EQ(encoded, std::string("S\0min_alloc_size", 16));
+    auto [pre, key] = KeyValueDB::decode_key(encoded);
+    EXPECT_EQ(pre, "S");
+    EXPECT_EQ(key, "min_alloc_size");
+}
+
+TEST(KeyValueDBEncodeKey, EmptyKey) {
+    auto encoded = KeyValueDB::encode_key("C", "");
+    EXPECT_EQ(encoded, std::string("C\0", 2));
+    auto [pre, key] = KeyValueDB::decode_key(encoded);
+    EXPECT_EQ(pre, "C");
+    EXPECT_TRUE(key.empty());
+}
+
+TEST(KeyValueDBEncodeKey, EmptyPrefix) {
+    auto encoded = KeyValueDB::encode_key("", "k");
+    EXPECT_EQ(encoded, std::string("\0k", 2));
+    auto [pre, key] = KeyValueDB::decode_key(encoded);
+    EXPECT_TRUE(pre.empty());
+    EXPECT_EQ(key, "k");
+}
+
+TEST(KeyValueDBEncodeKey, NoSeparatorDecodesAsPrefixOnly) {
+    auto [pre, key] = KeyValueDB::decode_key("noseparator");
+    EXPECT_EQ(pre, "noseparator");
+    EXPECT_TRUE(key.empty());
+}

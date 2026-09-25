@@ -159,9 +159,9 @@ BTier:      bdev->open() → alloc->create() → Journal::recover()
 
 | 阶段 | 内容 | 状态 | 详细计划 |
 | ------ | ------ | ------ | --------- |
-| Phase 1 | BlueFS (1.1–1.11) | 已完成 | [plan.md](../plan.md) |
-| Phase 2 | BlueRocksEnv (2.1–2.7) | 已完成 | [plan.md](../plan.md) |
-| Phase 3 | BlueStore (3.1–3.15) | 进行中 | [plan.md](../plan.md) |
+| Phase 1 | BlueFS (1.1–1.11) | 已完成 | [dev-plan.md](../dev-plan.md) |
+| Phase 2 | BlueRocksEnv (2.1–2.7) | 已完成 | [dev-plan.md](../dev-plan.md) |
+| Phase 3 | BlueStore (3.1–3.15) | 进行中 | [dev-plan.md](../dev-plan.md) |
 | Phase 4 | BTier (A1–A7, B1–B3, C1.1–C2.2) | 已完成 | [btier.md](btier.md) §9 |
 
 ## 7. 非功能性约束
@@ -248,4 +248,4 @@ BlueStore 和 BTier 提供不同语义（对象存储 vs KV 存储），且 BTie
 - [blue-rocks-env.md](blue-rocks-env.md) — BlueRocksEnv RocksDB 适配层
 - [bluestore.md](bluestore.md) — BlueStore 存储引擎
 - [btier.md](btier.md) — BTier 分层存储引擎
-- [../plan.md](../plan.md) — 开发计划
+- [../dev-plan.md](../dev-plan.md) — 开发计划

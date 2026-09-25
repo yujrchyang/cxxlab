@@ -388,8 +388,8 @@ size_t MigrationEngine::pending() const {
     return impl_->queue_.size();
 }
 
-MigrationEngine::Stats MigrationEngine::get_stats() const {
-    Stats s;
+MigrationStats MigrationEngine::get_stats() const {
+    MigrationStats s;
     s.promotions_committed = impl_->promotions_committed.load(std::memory_order_relaxed);
     s.demotions_committed = impl_->demotions_committed.load(std::memory_order_relaxed);
     s.compactions_committed = impl_->compactions_committed.load(std::memory_order_relaxed);

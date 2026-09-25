@@ -113,6 +113,15 @@ struct KeyLocation {
 enum class IoOp { READ,
                   WRITE };
 
+// ── Migration statistics ────────────────────────────────────────
+struct MigrationStats {
+    uint64_t promotions_committed = 0;
+    uint64_t demotions_committed = 0;
+    uint64_t compactions_committed = 0;
+    uint64_t interruptions = 0;
+    uint64_t io_errors = 0;
+};
+
 }  // namespace TOPNSPC::btier
 
 // ── DENC traits specialization (must be in namespace TOPNSPC) ──

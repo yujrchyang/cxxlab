@@ -111,10 +111,12 @@ private:
 
 struct RocksDBStore::RDBTransactionImpl : public TransactionImpl {
     ::rocksdb::WriteBatch batch;
+    ::rocksdb::DB *db = nullptr;
     uint64_t delete_range_threshold = 0;
 
-    explicit RDBTransactionImpl(uint64_t dr_threshold)
-        : delete_range_threshold(dr_threshold) {}
+    explicit RDBTransactionImpl(::rocksdb::DB *db_,
+                                uint64_t dr_threshold)
+        : db(db_), delete_range_threshold(dr_threshold) {}
 
     void set(const std::string &prefix, const std::string &k,
              const bufferlist &bl) override {
@@ -134,7 +136,30 @@ struct RocksDBStore::RDBTransactionImpl : public TransactionImpl {
 
     void rmkeys_by_prefix(
         const std::string &prefix) override {
-        batch.DeleteRange(prefix + '\0', prefix + static_cast<char>(0xff));
+        auto start = encode_key(prefix, "");
+        auto end = prefix + static_cast<char>(0xff);
+        if (delete_range_threshold == 0) {
+            batch.DeleteRange(start, end);
+            return;
+        }
+        uint64_t cnt = delete_range_threshold;
+        batch.SetSavePoint();
+        ::rocksdb::ReadOptions ropts;
+        ropts.fill_cache = false;
+        ::rocksdb::Slice lb(start);
+        ::rocksdb::Slice ub(end);
+        ropts.iterate_lower_bound = &lb;
+        ropts.iterate_upper_bound = &ub;
+        auto it = db->NewIterator(ropts);
+        for (it->SeekToFirst(); it->Valid() && (--cnt) != 0; it->Next()) {
+            batch.Delete(it->key());
+        }
+        if (cnt == 0) {
+            batch.RollbackToSavePoint();
+            batch.DeleteRange(start, end);
+        } else {
+            batch.PopSavePoint();
+        }
     }
 
     void rm_range_keys(const std::string &prefix,
@@ -142,15 +167,28 @@ struct RocksDBStore::RDBTransactionImpl : public TransactionImpl {
                        const std::string &end) override {
         auto s = encode_key(prefix, start);
         auto e = encode_key(prefix, end);
-        if (delete_range_threshold > 0 &&
-            e.size() - s.size() <= delete_range_threshold) {
-            // Small range: iterate and delete individually to avoid
-            // wide tombstone overhead
-            // (delegated to the store since we need an iterator)
-            // For now fall back to DeleteRange
+        if (delete_range_threshold == 0) {
+            batch.DeleteRange(s, e);
+            return;
+        }
+        uint64_t cnt = delete_range_threshold;
+        batch.SetSavePoint();
+        ::rocksdb::ReadOptions ropts;
+        ropts.fill_cache = false;
+        ::rocksdb::Slice lb(s);
+        ::rocksdb::Slice ub(e);
+        ropts.iterate_lower_bound = &lb;
+        ropts.iterate_upper_bound = &ub;
+        auto it = db->NewIterator(ropts);
+        for (it->Seek(s); it->Valid() && it->key().compare(e) < 0 && (--cnt) != 0;
+             it->Next()) {
+            batch.Delete(it->key());
+        }
+        if (cnt == 0) {
+            batch.RollbackToSavePoint();
             batch.DeleteRange(s, e);
         } else {
-            batch.DeleteRange(s, e);
+            batch.PopSavePoint();
         }
     }
 
@@ -310,6 +348,13 @@ int RocksDBStore::init(const std::string &options_str) {
     return 0;
 }
 
+void RocksDBStore::setup_merge_adapter(::rocksdb::Options &opts) {
+    if (!get_merge_ops().empty()) {
+        adapter_ = std::make_shared<RocksDBMergeAdapter>(get_merge_ops());
+        opts.merge_operator = adapter_;
+    }
+}
+
 int RocksDBStore::open_db(::rocksdb::Options opts,
                           std::ostream &out) {
     // Apply cached options from init()
@@ -321,11 +366,7 @@ int RocksDBStore::open_db(::rocksdb::Options opts,
         cached_opts_.max_bytes_for_level_base;
     opts.target_file_size_base = cached_opts_.target_file_size_base;
 
-    if (!get_merge_ops().empty()) {
-        adapter_ = std::make_shared<RocksDBMergeAdapter>(
-            get_merge_ops());
-        opts.merge_operator = adapter_;
-    }
+    setup_merge_adapter(opts);
 
     ::rocksdb::Status s = ::rocksdb::DB::Open(opts, dir_, &db_);
     if (!s.ok()) {
@@ -349,11 +390,7 @@ int RocksDBStore::create_and_open(std::ostream &out) {
 
 int RocksDBStore::open_read_only(std::ostream &out) {
     ::rocksdb::Options opts;
-    if (!get_merge_ops().empty()) {
-        adapter_ = std::make_shared<RocksDBMergeAdapter>(
-            get_merge_ops());
-        opts.merge_operator = adapter_;
-    }
+    setup_merge_adapter(opts);
     auto s = ::rocksdb::DB::OpenForReadOnly(opts, dir_, &db_);
     if (!s.ok()) {
         out << "RocksDB open_read_only failed: " << s.ToString()
@@ -381,7 +418,7 @@ void RocksDBStore::close() {
 }
 
 Transaction RocksDBStore::get_transaction() {
-    return std::make_shared<RDBTransactionImpl>(delete_range_threshold_);
+    return std::make_shared<RDBTransactionImpl>(db_, delete_range_threshold_);
 }
 
 int RocksDBStore::submit_transaction(Transaction t) {
@@ -481,21 +518,6 @@ uint64_t RocksDBStore::get_estimated_size(
     for (auto &f : files)
         total += f.size;
     return total;
-}
-
-// ── Helpers ──────────────────────────────────────────────────────
-
-std::string RocksDBStore::encode_key(const std::string &prefix,
-                                     const std::string &key) {
-    return prefix + '\0' + key;
-}
-
-std::pair<std::string, std::string> RocksDBStore::decode_key(
-    const std::string &full_key) {
-    auto pos = full_key.find('\0');
-    if (pos == std::string::npos)
-        return {full_key, {}};
-    return {full_key.substr(0, pos), full_key.substr(pos + 1)};
 }
 
 }  // namespace TOPNSPC

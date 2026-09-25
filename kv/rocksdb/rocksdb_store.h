@@ -57,12 +57,8 @@ private:
     class RocksDBMergeAdapter;
 
     // ── Helpers ─────────────────────────────────────────────
-    static std::string encode_key(const std::string &prefix,
-                                  const std::string &key);
-    static std::pair<std::string, std::string> decode_key(
-        const std::string &full_key);
-
     int open_db(rocksdb::Options opts, std::ostream &out);
+    void setup_merge_adapter(::rocksdb::Options &opts);
 
     // ── Members ─────────────────────────────────────────────
     rocksdb::DB *db_ = nullptr;

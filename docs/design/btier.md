@@ -556,11 +556,11 @@ BtierEngine::init(config):
 - 本项目 [docs/design/allocator.md](allocator.md): Allocator 设计
 - 本项目 `btier/btier.h`: BtierEngine 公共 API
 - 本项目 `btier/btier_types.h`: 数据结构定义
-- 本项目 [docs/plan.md](../plan.md): 开发计划（Phase 4: BTier）
+- 本项目 [docs/dev-plan.md](../dev-plan.md): 开发计划（Phase 4: BTier）
 
 ## 10. 开发计划
 
-BTier 的开发计划见 [plan.md](../plan.md) Phase 4，按接口边界分为 4 个阶段：
+BTier 的开发计划见 [dev-plan.md](../dev-plan.md) Phase 4，按接口边界分为 4 个阶段：
 
 | 阶段 | 内容 | 状态 |
 | --- | --- | --- |

@@ -23,6 +23,7 @@ public:
 
     Transaction get_transaction() override;
     int submit_transaction(Transaction t) override;
+    int submit_transaction_sync(Transaction t) override;
 
     int get(const std::string &prefix,
             const std::set<std::string> &keys,
@@ -41,11 +42,6 @@ public:
 private:
     class MDBTransactionImpl;
     class MDBWholeSpaceIteratorImpl;
-
-    std::string encode_key(const std::string &prefix,
-                           const std::string &key) const;
-    static std::pair<std::string, std::string> decode_key(
-        const std::string &full_key);
 
     void _set_key(const std::string &full_key,
                   const bufferlist &bl);
