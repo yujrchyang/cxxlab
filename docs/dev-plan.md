@@ -232,11 +232,11 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 依赖: 3.1
 - 测试: encode/decode roundtrip，排序一致性验证
 
-### 3.4 Blob 内存管理 [MVP]
+### 3.4 Blob 内存管理 [✅]
 
 | 文件 | 内容 |
 | --- | --- |
-| `BlueStore.h/cc` | `Blob` 类、`bluestore_blob_use_tracker_t` |
+| `bluestore/blob.h/cc` | `Blob` 类、`bluestore_blob_use_tracker_t` |
 
 - 依赖: 3.1
 - 测试: Blob 创建、`split()`、`get_ref()`/`put_ref()`、`used_in_blob` 引用追踪

@@ -66,17 +66,24 @@ void bluestore_blob_use_tracker_t::get(uint32_t offset, uint32_t len) {
     if (!num_au) {
         total_bytes += len;
     } else {
-        uint32_t start_au = offset / au_size;
-        uint32_t end_au = (offset + len + au_size - 1) / au_size;
-        for (uint32_t i = start_au; i < end_au && i < num_au; ++i) {
-            bytes_per_au[i] += len;
-            len = 0;
+        uint32_t end = offset + len;
+        while (offset < end) {
+            uint32_t phase = offset % au_size;
+            size_t pos = offset / au_size;
+            uint32_t diff = std::min(au_size - phase, end - offset);
+            bytes_per_au[pos] += diff;
+            offset += diff;
         }
     }
 }
 
 bool bluestore_blob_use_tracker_t::put(uint32_t offset, uint32_t len,
                                        PExtentVector *release) {
+    if (release) {
+        release->clear();
+    }
+
+    bool maybe_empty = true;
     if (!num_au) {
         if (total_bytes <= len) {
             total_bytes = 0;
@@ -86,23 +93,35 @@ bool bluestore_blob_use_tracker_t::put(uint32_t offset, uint32_t len,
         return false;
     }
 
-    uint32_t start_au = offset / au_size;
-    uint32_t end_au = (offset + len + au_size - 1) / au_size;
-    bool empty = true;
+    uint32_t end = offset + len;
+    uint64_t next_offs = 0;
 
-    for (uint32_t i = 0; i < num_au; ++i) {
-        if (i >= start_au && i < end_au) {
-            if (bytes_per_au[i] <= len) {
-                bytes_per_au[i] = 0;
-                len = 0;
-            } else {
-                bytes_per_au[i] -= len;
-                len = 0;
+    while (offset < end) {
+        uint32_t phase = offset % au_size;
+        size_t pos = offset / au_size;
+        uint32_t diff = std::min(au_size - phase, end - offset);
+
+        bytes_per_au[pos] -= diff;
+        offset += (phase ? au_size - phase : au_size);
+
+        if (bytes_per_au[pos] == 0) {
+            if (release) {
+                if (release->empty() || next_offs != pos * au_size) {
+                    release->emplace_back(pos * au_size, au_size);
+                    next_offs = pos * au_size;
+                } else {
+                    release->back().length += au_size;
+                }
+                next_offs += au_size;
             }
+        } else {
+            maybe_empty = false;
         }
-        if (bytes_per_au[i]) {
-            empty = false;
-        }
+    }
+
+    bool empty = maybe_empty ? !is_not_empty() : false;
+    if (empty && release) {
+        release->clear();
     }
 
     return empty;
@@ -134,6 +153,38 @@ void bluestore_blob_use_tracker_t::split(uint32_t blob_offset,
     allocate(split_au);
     std::memcpy(bytes_per_au, old_bytes, split_au * sizeof(uint32_t));
     release(old_alloc, old_bytes);
+}
+
+void bluestore_blob_use_tracker_t::add_tail(uint32_t new_len, uint32_t _au_size) {
+    uint32_t full_size = au_size * (num_au ? num_au : 1);
+    if (new_len == full_size) {
+        return;
+    }
+    if (!num_au) {
+        uint32_t old_total = total_bytes;
+        total_bytes = 0;
+        init(new_len, _au_size);
+        if (num_au) {
+            bytes_per_au[0] = old_total;
+        }
+    } else {
+        uint32_t _num_au = new_len / _au_size;
+        if (_num_au > num_au) {
+            auto old_bytes = bytes_per_au;
+            auto old_num_au = num_au;
+            auto old_alloc_au = alloc_au;
+            alloc_au = num_au = 0;
+            bytes_per_au = nullptr;
+            allocate(_num_au);
+            for (uint32_t i = 0; i < old_num_au; i++) {
+                bytes_per_au[i] = old_bytes[i];
+            }
+            for (uint32_t i = old_num_au; i < num_au; i++) {
+                bytes_per_au[i] = 0;
+            }
+            release(old_alloc_au, old_bytes);
+        }
+    }
 }
 
 void bluestore_blob_t::allocated(uint32_t b_off, uint32_t length,
@@ -187,6 +238,51 @@ void bluestore_blob_t::split(uint32_t blob_offset, bluestore_blob_t &rb) {
         rb.csum_chunk_order = csum_chunk_order;
         rb.flags |= FLAG_CSUM;
     }
+}
+
+bool bluestore_blob_t::release_extents(bool all,
+                                       const PExtentVector &logical,
+                                       PExtentVector *r) {
+    if (all) {
+        for (auto &e : extents) {
+            if (e.is_valid()) {
+                r->push_back(e);
+            }
+        }
+        extents.clear();
+        logical_length = 0;
+        return true;
+    }
+
+    PExtentVector new_extents;
+    uint32_t new_logical_length = 0;
+    uint32_t logical_off = 0;
+
+    for (const auto &e : extents) {
+        uint32_t e_end = logical_off + e.length;
+        bool fully_released = false;
+
+        for (const auto &l : logical) {
+            if (l.offset <= logical_off && l.offset + l.length >= e_end) {
+                fully_released = true;
+                if (e.is_valid()) {
+                    r->push_back(e);
+                }
+                break;
+            }
+        }
+
+        if (!fully_released) {
+            new_extents.push_back(e);
+            new_logical_length += e.length;
+        }
+        logical_off = e_end;
+    }
+
+    extents = std::move(new_extents);
+    logical_length = new_logical_length;
+
+    return extents.empty();
 }
 
 }  // namespace TOPNSPC

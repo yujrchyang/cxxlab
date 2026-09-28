@@ -126,6 +126,7 @@ struct bluestore_blob_use_tracker_t {
     bool can_split() const;
     bool can_split_at(uint32_t blob_offset) const;
     void split(uint32_t blob_offset, bluestore_blob_use_tracker_t *r);
+    void add_tail(uint32_t new_len, uint32_t _au_size);
 
     void bound_encode(size_t &p) const {
         denc(au_size, p);
@@ -235,8 +236,57 @@ public:
         csum_data = buffer::create(get_csum_value_size() * len / get_csum_chunk_size());
     }
 
+    bool is_mutable() const {
+        return !has_flag(FLAG_HAS_UNUSED);
+    }
+
+    bool can_split() const {
+        return !has_flag(FLAG_HAS_UNUSED);
+    }
+
+    bool can_split_at(uint32_t blob_offset) const {
+        return !has_csum() || blob_offset % get_csum_chunk_size() == 0;
+    }
+
+    bool is_unallocated(uint64_t b_off, uint64_t b_len) const {
+        if (b_off + b_len > logical_length) {
+            return false;
+        }
+
+        uint64_t extent_off = 0;
+        for (const auto &e : extents) {
+            uint64_t extent_end = extent_off + e.length;
+
+            if (b_off < extent_end && b_off + b_len > extent_off) {
+                if (e.offset != bluestore_pextent_t::INVALID_OFFSET) {
+                    return false;
+                }
+            }
+
+            extent_off = extent_end;
+            if (extent_off >= b_off + b_len) {
+                break;
+            }
+        }
+        return true;
+    }
+
+    void add_tail(uint32_t new_len) {
+        extents.emplace_back(bluestore_pextent_t(bluestore_pextent_t::INVALID_OFFSET,
+                                                 new_len - logical_length));
+        logical_length = new_len;
+        if (has_csum()) {
+            buffer::ptr t;
+            t.swap(csum_data);
+            csum_data = buffer::create(get_csum_value_size() * logical_length / get_csum_chunk_size());
+            csum_data.copy_in(0, t.length(), t.c_str());
+            csum_data.zero(t.length(), csum_data.length() - t.length());
+        }
+    }
+
     void allocated(uint32_t b_off, uint32_t length, const PExtentVector &allocs);
     void split(uint32_t blob_offset, bluestore_blob_t &rb);
+    bool release_extents(bool all, const PExtentVector &logical, PExtentVector *r);
 
     DENC_HELPERS
     void bound_encode(size_t &p) const { _denc_friend(*this, p); }

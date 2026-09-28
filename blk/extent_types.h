@@ -9,11 +9,15 @@
 namespace TOPNSPC {
 
 struct pextent_t {
+    static constexpr uint64_t INVALID_OFFSET = ~0ull;
+
     uint64_t offset = 0;
     uint32_t length = 0;
 
     pextent_t() = default;
     pextent_t(uint64_t o, uint32_t l) : offset(o), length(l) {}
+
+    bool is_valid() const { return offset != INVALID_OFFSET; }
 
     DENC(pextent_t, v, p) {
         DENC_START(1, 1, p);
