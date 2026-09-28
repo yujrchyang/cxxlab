@@ -195,6 +195,10 @@ public:
     buffer::ptr csum_data;
 
     bluestore_blob_t() = default;
+    bluestore_blob_t(const bluestore_blob_t &) = default;
+    bluestore_blob_t(bluestore_blob_t &&) = default;
+    bluestore_blob_t &operator=(const bluestore_blob_t &) = default;
+    bluestore_blob_t &operator=(bluestore_blob_t &&) = default;
 
     const PExtentVector &get_extents() const { return extents; }
     PExtentVector &dirty_extents() { return extents; }

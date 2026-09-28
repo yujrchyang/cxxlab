@@ -250,14 +250,16 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 依赖: 3.4
 - 测试: 插入 extent → 按偏移查找 → 打孔 → 删除 → 重新映射
 
-### 3.6 Onode + Collection（内存 + KV）[MVP]
+### 3.6 Onode + Collection（内存 + KV）[✅]
 
 | 文件 | 内容 |
 | --- | --- |
-| `BlueStore.h/cc` | `Onode`、`Collection`、`get_onode()`、`write_onode()` 到 KV、shard index 管理 |
+| `bluestore/onode.h/cc` | `Onode`、`write_to_kv()`、`read_from_kv()` |
+| `bluestore/collection.h/cc` | `Collection`、`OnodeSpace`、`get_onode()`、`create_onode()`、`remove_onode()` |
+| `bluestore/bluestore_constants.h` | KV 前缀常量定义 |
 
 - 依赖: 3.3 + 3.5 + KV (RocksDBStore)
-- 测试: Onode 编码 → KV 读写 → 解码验证 → shard 分片加载/保存
+- 测试: Onode 编码 → KV 读写 → 解码验证 → LRU 缓存淘汰
 
 ### 3.7 mkfs + mount [MVP]
 

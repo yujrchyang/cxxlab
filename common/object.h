@@ -97,3 +97,21 @@ void key_encode_extent_shard(const std::string &onode_key, uint32_t offset,
                              std::string *key);
 
 }  // namespace TOPNSPC
+
+namespace std {
+
+template <>
+struct hash<TOPNSPC::ghobject_t> {
+    size_t operator()(const TOPNSPC::ghobject_t &obj) const {
+        size_t h = 0;
+        h ^= std::hash<int64_t>{}(obj.pool) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint32_t>{}(obj.hash) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<std::string>{}(obj.oid) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint64_t>{}(obj.snap) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint64_t>{}(obj.generation) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        h ^= std::hash<uint8_t>{}(obj.shard_id) + 0x9e3779b9 + (h << 6) + (h >> 2);
+        return h;
+    }
+};
+
+}  // namespace std

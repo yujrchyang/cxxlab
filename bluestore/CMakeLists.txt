@@ -1,7 +1,9 @@
 add_library(bluestore SHARED
     blob.cc
     bluestore_types.cc
+    collection.cc
     extent_map.cc
+    onode.cc
     freelist_manager.cc
     bitmap_freelist_manager.cc
     blue_rocks_env.cc

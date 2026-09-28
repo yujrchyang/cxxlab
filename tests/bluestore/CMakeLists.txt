@@ -18,6 +18,17 @@ target_link_libraries(test_bluestore_extent_map
 )
 add_test(NAME test_bluestore_extent_map COMMAND test_bluestore_extent_map)
 
+add_executable(test_onode_collection test_onode_collection.cc)
+target_include_directories(test_onode_collection PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_onode_collection
+    PRIVATE
+        bluestore
+        kv
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_onode_collection COMMAND test_onode_collection)
+
 add_executable(test_bluestore_types test_bluestore_types.cc)
 target_include_directories(test_bluestore_types PRIVATE ${PROJECT_SOURCE_DIR})
 target_link_libraries(test_bluestore_types
