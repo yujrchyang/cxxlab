@@ -7,6 +7,7 @@ add_library(common SHARED
     error.cc
     formatter.cc
     logger.cc
+    object.cc
     safe_io.cc
     spinlock.cc
     throttle.cc

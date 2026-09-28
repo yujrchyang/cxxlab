@@ -4,7 +4,7 @@
 #include <cstdint>
 #include <map>
 
-#include "common/common_fwd.h"
+#include "common_fwd.h"
 #include "common/denc.h"
 
 namespace TOPNSPC {

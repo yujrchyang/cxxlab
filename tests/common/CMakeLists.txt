@@ -190,3 +190,12 @@ target_link_libraries(test_throttle
         GTest::gtest_main
 )
 add_test(NAME test_throttle COMMAND test_throttle)
+
+add_executable(test_object test_object.cc)
+target_include_directories(test_object PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_object
+    PRIVATE
+        common
+        GTest::gtest_main
+)
+add_test(NAME test_object COMMAND test_object)
