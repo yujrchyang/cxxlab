@@ -8,6 +8,16 @@ target_link_libraries(test_blob
 )
 add_test(NAME test_blob COMMAND test_blob)
 
+add_executable(test_bluestore_extent_map test_extent_map.cc)
+target_include_directories(test_bluestore_extent_map PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_bluestore_extent_map
+    PRIVATE
+        bluestore
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_bluestore_extent_map COMMAND test_bluestore_extent_map)
+
 add_executable(test_bluestore_types test_bluestore_types.cc)
 target_include_directories(test_bluestore_types PRIVATE ${PROJECT_SOURCE_DIR})
 target_link_libraries(test_bluestore_types

@@ -241,11 +241,11 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 依赖: 3.1
 - 测试: Blob 创建、`split()`、`get_ref()`/`put_ref()`、`used_in_blob` 引用追踪
 
-### 3.5 ExtentMap [MVP]
+### 3.5 ExtentMap [✅]
 
 | 文件 | 内容 |
 | --- | --- |
-| `BlueStore.h/cc` | `ExtentMap`、`Extent`、`seek_lextent()`、`punch_hole()`、`add()`、`rm()`、`compress_extent_map()`、`needs_reshard()` |
+| `bluestore/extent_map.h/cc` | `ExtentMap`、`Extent`、`seek_lextent()`、`punch_hole()`、`add()`、`rm()`、`compress_extent_map()`、`needs_reshard()` |
 
 - 依赖: 3.4
 - 测试: 插入 extent → 按偏移查找 → 打孔 → 删除 → 重新映射
