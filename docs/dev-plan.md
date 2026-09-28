@@ -261,13 +261,14 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 依赖: 3.3 + 3.5 + KV (RocksDBStore)
 - 测试: Onode 编码 → KV 读写 → 解码验证 → LRU 缓存淘汰
 
-### 3.7 mkfs + mount [MVP]
+### 3.7 mkfs + mount [✅]
 
 | 文件 | 内容 |
 | --- | --- |
-| `BlueStore.h/cc` | `mkfs()`、`mount()`、`_open_db_and_around()`、`_open_collections()`、`_read_super_meta()` |
+| `bluestore/bluestore.h/cc` | `mkfs()`、`mount()`、`_open_bdev()`、`_open_db()`、`_open_fm()`、`_init_alloc()`、`_open_collections()`、`_read_super_meta()` |
+| `bluestore/bluestore_config.h` | `BlueStoreConfig` 结构体 |
 
-- 依赖: 3.6 + FreelistManager + Allocator + BlockDevice + BlueFS（先 mount BlueFS）
+- 依赖: 3.6 + FreelistManager + Allocator + BlockDevice
 - 测试: mkfs → mount → 验证超级块、collections、allocator 状态正确
 
 ### 3.8 TransContext + OpSequencer [MVP]

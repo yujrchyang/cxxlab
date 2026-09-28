@@ -1,3 +1,15 @@
+add_executable(test_bluestore test_bluestore.cc)
+target_include_directories(test_bluestore PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_bluestore
+    PRIVATE
+        bluestore
+        kv
+        blk
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_bluestore COMMAND test_bluestore)
+
 add_executable(test_blob test_blob.cc)
 target_include_directories(test_blob PRIVATE ${PROJECT_SOURCE_DIR})
 target_link_libraries(test_blob

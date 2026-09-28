@@ -432,6 +432,8 @@ int RocksDBStore::submit_transaction_sync(Transaction t) {
     ::rocksdb::WriteOptions wopts;
     wopts.sync = true;
     auto s = db_->Write(wopts, &rdb_t->batch);
+    if (!s.ok()) {
+    }
     return s.ok() ? 0 : -EIO;
 }
 

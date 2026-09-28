@@ -1,5 +1,6 @@
 add_library(bluestore SHARED
     blob.cc
+    bluestore.cc
     bluestore_types.cc
     collection.cc
     extent_map.cc
