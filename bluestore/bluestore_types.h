@@ -1,9 +1,355 @@
 #pragma once
 
+#include <cstdint>
+#include <map>
+#include <string>
+#include <vector>
+
 #include "blk/extent_types.h"
+#include "common/buffer.h"
+#include "common/denc.h"
+#include "common/interval_set.h"
+#include "common/uuid.h"
 
 namespace TOPNSPC {
 
 using bluestore_pextent_t = pextent_t;
+
+enum ChecksumType : uint8_t {
+    CSUM_NONE = 0,
+    CSUM_CRC32C = 1,
+    CSUM_XXHASH32 = 2,
+    CSUM_XXHASH64 = 3,
+    CSUM_CRC32C_16 = 4,
+    CSUM_CRC32C_8 = 5,
+};
+
+inline size_t csum_value_size(uint8_t type) {
+    switch (type) {
+    case CSUM_NONE:
+        return 0;
+    case CSUM_CRC32C:
+    case CSUM_XXHASH32:
+    case CSUM_CRC32C_16:
+    case CSUM_CRC32C_8:
+        return 4;
+    case CSUM_XXHASH64:
+        return 8;
+    default:
+        return 0;
+    }
+}
+
+struct bluestore_bdev_label_t {
+    uuid_d osd_uuid;
+    uint64_t size = 0;
+    std::string description;
+    std::map<std::string, std::string> meta;
+
+    DENC(bluestore_bdev_label_t, v, p) {
+        DENC_START(1, 1, p);
+        denc(v.osd_uuid, p);
+        denc(v.size, p);
+        denc(v.description, p);
+        denc(v.meta, p);
+        DENC_FINISH(p);
+    }
+};
+WRITE_CLASS_DENC(bluestore_bdev_label_t);
+
+struct bluestore_cnode_t {
+    uint32_t bits = 0;
+
+    explicit bluestore_cnode_t(uint32_t b = 0) : bits(b) {}
+
+    DENC(bluestore_cnode_t, v, p) {
+        DENC_START(1, 1, p);
+        denc(v.bits, p);
+        DENC_FINISH(p);
+    }
+};
+WRITE_CLASS_DENC(bluestore_cnode_t);
+
+struct bluestore_blob_use_tracker_t {
+    uint32_t au_size = 0;
+    uint32_t num_au = 0;
+    uint32_t alloc_au = 0;
+
+    union {
+        uint32_t *bytes_per_au;
+        uint32_t total_bytes;
+    };
+
+    bluestore_blob_use_tracker_t()
+        : au_size(0), num_au(0), alloc_au(0), bytes_per_au(nullptr) {}
+
+    bluestore_blob_use_tracker_t(const bluestore_blob_use_tracker_t &other);
+    bluestore_blob_use_tracker_t &operator=(const bluestore_blob_use_tracker_t &rhs);
+    ~bluestore_blob_use_tracker_t() { clear(); }
+
+    void clear() {
+        release(alloc_au, bytes_per_au);
+        num_au = 0;
+        alloc_au = 0;
+        bytes_per_au = nullptr;
+        au_size = 0;
+    }
+
+    uint32_t get_referenced_bytes() const {
+        if (!num_au) {
+            return total_bytes;
+        }
+        uint32_t total = 0;
+        for (uint32_t i = 0; i < num_au; ++i) {
+            total += bytes_per_au[i];
+        }
+        return total;
+    }
+
+    bool is_empty() const {
+        if (!num_au) {
+            return total_bytes == 0;
+        }
+        for (uint32_t i = 0; i < num_au; ++i) {
+            if (bytes_per_au[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    bool is_not_empty() const { return !is_empty(); }
+
+    void init(uint32_t full_length, uint32_t _au_size);
+    void get(uint32_t offset, uint32_t len);
+    bool put(uint32_t offset, uint32_t len, PExtentVector *release);
+    bool can_split() const;
+    bool can_split_at(uint32_t blob_offset) const;
+    void split(uint32_t blob_offset, bluestore_blob_use_tracker_t *r);
+
+    void bound_encode(size_t &p) const {
+        denc(au_size, p);
+        if (au_size) {
+            denc(num_au, p);
+            if (!num_au) {
+                denc(total_bytes, p);
+            } else {
+                p += sizeof(uint32_t) * num_au;
+            }
+        }
+    }
+
+    void encode(buffer::list::contiguous_appender &p) const {
+        denc(au_size, p);
+        if (au_size) {
+            denc(num_au, p);
+            if (!num_au) {
+                denc(total_bytes, p);
+            } else {
+                for (uint32_t i = 0; i < num_au; ++i) {
+                    denc(bytes_per_au[i], p);
+                }
+            }
+        }
+    }
+
+    void decode(buffer::ptr::const_iterator &p) {
+        clear();
+        denc(au_size, p);
+        if (au_size) {
+            uint32_t _num_au;
+            denc(_num_au, p);
+            if (!_num_au) {
+                num_au = 0;
+                denc(total_bytes, p);
+            } else {
+                allocate(_num_au);
+                for (uint32_t i = 0; i < _num_au; ++i) {
+                    denc(bytes_per_au[i], p);
+                }
+            }
+        }
+    }
+
+private:
+    void allocate(uint32_t _num_au);
+    void release(uint32_t _num_au, uint32_t *ptr);
+};
+WRITE_CLASS_DENC(bluestore_blob_use_tracker_t);
+
+struct bluestore_blob_t {
+private:
+    PExtentVector extents;
+    uint32_t logical_length = 0;
+
+public:
+    enum Flags {
+        FLAG_CSUM = 4,
+        FLAG_HAS_UNUSED = 8,
+    };
+
+    uint32_t flags = 0;
+    uint8_t csum_type = CSUM_NONE;
+    uint8_t csum_chunk_order = 0;
+    buffer::ptr csum_data;
+
+    bluestore_blob_t() = default;
+
+    const PExtentVector &get_extents() const { return extents; }
+    PExtentVector &dirty_extents() { return extents; }
+
+    bool has_flag(unsigned f) const { return flags & f; }
+    void set_flag(unsigned f) { flags |= f; }
+    void clear_flag(unsigned f) { flags &= ~f; }
+
+    bool has_csum() const { return has_flag(FLAG_CSUM); }
+    bool has_unused() const { return has_flag(FLAG_HAS_UNUSED); }
+
+    uint32_t get_csum_chunk_size() const {
+        return 1 << csum_chunk_order;
+    }
+
+    uint64_t get_chunk_size(uint64_t dev_block_size) const {
+        return has_csum() ? std::max<uint64_t>(dev_block_size, get_csum_chunk_size())
+                          : dev_block_size;
+    }
+
+    uint32_t get_logical_length() const { return logical_length; }
+
+    uint32_t get_ondisk_length() const {
+        uint32_t len = 0;
+        for (const auto &e : extents) {
+            len += e.length;
+        }
+        return len;
+    }
+
+    size_t get_csum_value_size() const {
+        return csum_value_size(csum_type);
+    }
+
+    void init_csum(uint8_t type, uint8_t order, uint32_t len) {
+        flags |= FLAG_CSUM;
+        csum_type = type;
+        csum_chunk_order = order;
+        csum_data = buffer::create(get_csum_value_size() * len / get_csum_chunk_size());
+    }
+
+    void allocated(uint32_t b_off, uint32_t length, const PExtentVector &allocs);
+    void split(uint32_t blob_offset, bluestore_blob_t &rb);
+
+    DENC_HELPERS
+    void bound_encode(size_t &p) const { _denc_friend(*this, p); }
+    void encode(buffer::list::contiguous_appender &p) const {
+        _denc_friend(*this, p);
+    }
+    void decode(buffer::ptr::const_iterator &p) {
+        _denc_friend(*this, p);
+    }
+
+    template <typename T, typename P>
+    friend std::enable_if_t<std::is_same_v<bluestore_blob_t,
+                                           std::remove_const_t<T>>>
+    _denc_friend(T &v, P &p) {
+        DENC_START(1, 1, p);
+        denc(v.extents, p);
+        denc(v.logical_length, p);
+        denc(v.flags, p);
+        if (v.has_csum()) {
+            denc(v.csum_type, p);
+            denc(v.csum_chunk_order, p);
+            denc(v.csum_data, p);
+        }
+        DENC_FINISH(p);
+    }
+};
+WRITE_CLASS_DENC(bluestore_blob_t);
+
+struct bluestore_onode_t {
+    uint64_t nid = 0;
+    uint64_t size = 0;
+    std::map<std::string, buffer::ptr> attrs;
+
+    struct shard_info {
+        uint32_t offset = 0;
+        uint32_t bytes = 0;
+
+        DENC(shard_info, v, p) {
+            DENC_START(1, 1, p);
+            denc(v.offset, p);
+            denc(v.bytes, p);
+            DENC_FINISH(p);
+        }
+    };
+
+    std::vector<shard_info> extent_map_shards;
+    uint32_t expected_object_size = 0;
+    uint32_t expected_write_size = 0;
+    uint32_t alloc_hint_flags = 0;
+    uint8_t flags = 0;
+
+    enum {
+        FLAG_OMAP = 1,
+        FLAG_PGMETA_OMAP = 2,
+        FLAG_PERPOOL_OMAP = 4,
+        FLAG_PERPG_OMAP = 8,
+    };
+
+    bool has_flag(unsigned f) const { return flags & f; }
+    void set_flag(unsigned f) { flags |= f; }
+    void clear_flag(unsigned f) { flags &= ~f; }
+    bool has_omap() const { return has_flag(FLAG_OMAP); }
+
+    DENC(bluestore_onode_t, v, p) {
+        DENC_START(1, 1, p);
+        denc(v.nid, p);
+        denc(v.size, p);
+        denc(v.attrs, p);
+        denc(v.extent_map_shards, p);
+        denc(v.expected_object_size, p);
+        denc(v.expected_write_size, p);
+        denc(v.alloc_hint_flags, p);
+        denc(v.flags, p);
+        DENC_FINISH(p);
+    }
+};
+WRITE_CLASS_DENC(bluestore_onode_t::shard_info);
+WRITE_CLASS_DENC(bluestore_onode_t);
+
+struct bluestore_deferred_op_t {
+    enum type_t : uint8_t {
+        OP_WRITE = 1,
+    };
+
+    uint8_t op = 0;
+    PExtentVector extents;
+    bufferlist data;
+
+    DENC(bluestore_deferred_op_t, v, p) {
+        DENC_START(1, 1, p);
+        denc(v.op, p);
+        denc(v.extents, p);
+        denc(v.data, p);
+        DENC_FINISH(p);
+    }
+};
+WRITE_CLASS_DENC(bluestore_deferred_op_t);
+
+struct bluestore_deferred_transaction_t {
+    uint64_t seq = 0;
+    std::vector<bluestore_deferred_op_t> ops;
+    interval_set<uint64_t> released;
+
+    bluestore_deferred_transaction_t() = default;
+
+    DENC(bluestore_deferred_transaction_t, v, p) {
+        DENC_START(1, 1, p);
+        denc(v.seq, p);
+        denc(v.ops, p);
+        denc(v.released, p);
+        DENC_FINISH(p);
+    }
+};
+WRITE_CLASS_DENC(bluestore_deferred_transaction_t);
 
 }  // namespace TOPNSPC

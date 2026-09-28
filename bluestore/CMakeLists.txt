@@ -1,4 +1,5 @@
 add_library(bluestore SHARED
+    bluestore_types.cc
     freelist_manager.cc
     bitmap_freelist_manager.cc
     blue_rocks_env.cc

@@ -5,6 +5,7 @@
 #include <map>
 
 #include "common/common_fwd.h"
+#include "common/denc.h"
 
 namespace TOPNSPC {
 
@@ -99,8 +100,43 @@ public:
             insert(off, len);
     }
 
+    void encode(bufferlist &bl) const {
+        denc(m_, bl);
+    }
+
+    void decode(buffer::ptr::const_iterator &p) {
+        denc(m_, p);
+    }
+
+    void decode(bufferlist::const_iterator &p) {
+        denc(m_, p);
+    }
+
+    const Map &get_map() const { return m_; }
+
 private:
     Map m_;
+};
+
+template <typename T>
+struct denc_traits<interval_set<T>> {
+    static constexpr bool supported = true;
+    static constexpr bool featured = false;
+    static constexpr bool bounded = false;
+    static constexpr bool need_contiguous = true;
+
+    static void bound_encode(const interval_set<T> &v, size_t &p) {
+        denc(v.get_map(), p);
+    }
+
+    static void encode(const interval_set<T> &v,
+                       buffer::list::contiguous_appender &p) {
+        denc(v.get_map(), p);
+    }
+
+    static void decode(interval_set<T> &v, buffer::ptr::const_iterator &p) {
+        v.decode(p);
+    }
 };
 
 }  // namespace TOPNSPC
