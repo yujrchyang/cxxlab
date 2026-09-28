@@ -824,10 +824,10 @@ mount()
 
 BlueStore 功能按 8 大需求类别组织，每个功能点标注优先级：
 
-- MVP: 最小可行产品（104 项，52%）— 核心读写路径、事务语义、空间管理、基本完整性、最小性能、单设备
+- MVP: 最小可行产品（105 项，52%）— 核心读写路径、事务语义、空间管理、基本完整性、最小性能、单设备
 - P1: 强烈建议（41 项，20%）— OMap、FSCK、Buffer Cache、增强可靠性
 - P2: 后续迭代（28 项，14%）— 诊断、高级缓存、错误注入测试
-- Deferred: 明确延迟（28 项，14%）— ADR-03（压缩）、ADR-04（SharedBlob/Clone/Snapshot）、多设备操作
+- Deferred: 明确延迟（27 项，13%）— ADR-03（压缩）、ADR-04（SharedBlob/Clone/Snapshot）、多设备操作
 
 ### 8.1 需求类别
 
@@ -850,11 +850,11 @@ BlueStore 功能按 8 大需求类别组织，每个功能点标注优先级：
 | R2. 事务语义 | 30 | 24 | 3 | 1 | 2 |
 | R3. 空间管理 | 30 | 27 | 1 | 2 | 0 |
 | R4. 数据完整性 | 20 | 11 | 8 | 1 | 0 |
-| R5. 性能优化 | 35 | 9 | 15 | 5 | 6 |
+| R5. 性能优化 | 35 | 10 | 15 | 5 | 5 |
 | R6. 分布式支撑 | 13 | 1 | 4 | 0 | 8 |
 | R7. 可观测性与运维 | 26 | 3 | 7 | 16 | 0 |
 | R8. 多设备管理 | 12 | 5 | 0 | 0 | 7 |
-| 合计 | 201 | 104 (52%) | 41 (20%) | 28 (14%) | 28 (14%) |
+| 合计 | 201 | 105 (52%) | 41 (20%) | 28 (14%) | 27 (13%) |
 
 > 详细功能点清单见 §9。
 
@@ -1006,7 +1006,7 @@ BlueStore 功能按 8 大需求类别组织，每个功能点标注优先级：
 | 5 | `_read_cache` | P1 | 缓存命中检查 |
 | 6 | `_generate_read_result_bl` | MVP | 组装读取结果 |
 | 7 | `_prepare_read_ioc` | MVP | 构建 AIO 读取 |
-| 8 | `_choose_write_options` | Deferred | 写选项选择（简化版 MVP） |
+| 8 | `_choose_write_options` | MVP | 简化版：根据 fadvise_flags 选择 buffered/direct |
 | 9 | Deferred Write 核心 | MVP | `_do_deferred_write` |
 | 10 | `_deferred_submit` | MVP | 延迟写提交 |
 | 11 | `DeferredBatch` | P1 | 延迟写批处理 |
@@ -1133,7 +1133,7 @@ cxxlab 需要同时运行在 x86\_64 和 AArch64 上。
 
 结论：ARM/x86 双平台对 BlueStore 核心逻辑无影响。主要适配工作是将 Ceph 自定义同步原语替换为 `std::` 标准库，移除 mempool/PerfCounters 等运行时框架，确保序列化使用 `cxxlab_le*` 类型。
 
-## 11. MVP 核心能力（104 items）
+## 11. MVP 核心能力（105 items）
 
 MVP 阶段必须实现的功能点，按需求类别分组：
 
@@ -1164,10 +1164,11 @@ MVP 阶段必须实现的功能点，按需求类别分组：
 - 设备标签读写、超级块读写
 - 崩溃恢复、数据一致性保证
 
-### R5 性能优化（9 items）
+### R5 性能优化（10 items）
 
 - 读取路径：`_generate_read_result_bl`, `_prepare_read_ioc`
 - Deferred Write 核心：`_do_deferred_write`, `_deferred_submit`, `_deferred_replay`
+- 写选项选择：`_choose_write_options`（简化版，根据 fadvise_flags 选择 buffered/direct）
 - 读写路径优化、写入合并、批量提交
 
 ### R6 分布式支撑（1 item）
