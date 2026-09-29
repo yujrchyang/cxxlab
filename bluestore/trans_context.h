@@ -234,4 +234,32 @@ struct BlueStoreTransaction {
     size_t num_ops() const { return ops.size(); }
 };
 
+struct WriteContext {
+    struct write_item {
+        uint64_t logical_offset;
+        BlobRef b;
+        uint64_t blob_length;
+        uint64_t b_off;
+        bufferlist bl;
+        uint64_t b_off0;
+        uint64_t length0;
+        bool new_blob;
+
+        write_item(uint64_t loffs, BlobRef blob, uint64_t blen, uint64_t o,
+                   bufferlist &data, uint64_t o0, uint64_t len0, bool nb)
+            : logical_offset(loffs), b(blob), blob_length(blen), b_off(o), bl(data), b_off0(o0), length0(len0), new_blob(nb) {}
+    };
+
+    unsigned csum_order = 0;
+    uint64_t target_blob_size = 0;
+
+    std::vector<write_item> writes;
+    std::vector<OldExtent> old_extents;
+
+    void write(uint64_t loffs, BlobRef b, uint64_t blen, uint64_t o,
+               bufferlist &data, uint64_t o0, uint64_t len0, bool nb) {
+        writes.emplace_back(loffs, b, blen, o, data, o0, len0, nb);
+    }
+};
+
 }  // namespace TOPNSPC

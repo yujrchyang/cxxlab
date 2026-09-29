@@ -14,6 +14,8 @@ struct BlueStoreConfig {
 
     uint64_t min_alloc_size = 65536;
     uint64_t block_size = 4096;
+    uint64_t max_blob_size = 65536;
+    uint8_t csum_type = 1;  // CSUM_CRC32C
 
     std::string freelist_type = "bitmap";
     std::string allocator_type = "bitmap";

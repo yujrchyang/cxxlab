@@ -3,6 +3,8 @@
 #include <algorithm>
 #include <cstring>
 
+#include "common/crc32.h"
+
 namespace TOPNSPC {
 
 bluestore_blob_use_tracker_t::bluestore_blob_use_tracker_t(
@@ -283,6 +285,24 @@ bool bluestore_blob_t::release_extents(bool all,
     logical_length = new_logical_length;
 
     return extents.empty();
+}
+
+void bluestore_blob_t::calc_csum(uint64_t b_off, bufferlist &bl,
+                                 uint64_t dev_block_size) {
+    if (!has_csum() || bl.length() == 0) return;
+
+    uint64_t chunk_size = get_chunk_size(dev_block_size);
+    uint32_t blocks = bl.length() / chunk_size;
+    size_t vsz = get_csum_value_size();
+
+    for (uint32_t i = 0; i < blocks; ++i) {
+        uint32_t crc = calc_crc32(
+            reinterpret_cast<const uint8_t *>(bl.c_str()) + i * chunk_size,
+            chunk_size);
+
+        uint32_t csum_idx = b_off / chunk_size + i;
+        std::memcpy(csum_data.c_str() + csum_idx * vsz, &crc, vsz);
+    }
 }
 
 }  // namespace TOPNSPC

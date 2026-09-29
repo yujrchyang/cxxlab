@@ -280,7 +280,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 依赖: 3.7
 - 测试: 创建 TransContext → 状态推进 → OpSequencer 顺序保证
 
-### 3.9 Small Write 路径 [MVP]
+### 3.9 Small Write 路径 [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -596,6 +596,16 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
   - AIO callback wired via `_aio_callback` → `txc_aio_finish` → `_txc_state_proc`
   - `_txc_finish_io` ordering: backward walk to find earliest consecutive IO_DONE, forward walk to process (matches Ceph's intrusive list approach using std::deque)
   - `queue_transactions()`: top-level entry point accepting `BlueStoreTransaction` vector + on_commit callback
+- BlueStore Small Write Path (Phase 3.9): 11 tests
+  - `bluestore_config.h`: added `max_blob_size` (64KB default), `csum_type` (CRC32C default)
+  - `bluestore_types.h/cc`: `calc_csum()` using `calc_crc32()` from `common/crc32.h`
+  - `extent_map.h/cc`: `set_lextent()` — creates extent + optional punch_hole
+  - `trans_context.h`: `WriteContext` + `write_item` (tracks pending writes per transaction)
+  - Write pipeline: `_do_write()` → `_do_write_data()` → `_do_write_small()` → `_do_alloc_write()` → `_wctx_finish()`
+  - `_do_write_small()`: blob reuse via `can_reuse_blob()` (forward search), zero detection (punch hole), pad_zeros alignment
+  - `_do_alloc_write()`: batch allocation, init_csum/calc_csum, set_lextent, AIO submission
+  - `_wctx_finish()`: put_ref on old extents, record released physical extents in txc->released
+  - `_do_write_data()`: splits cross-AU writes into per-chunk small writes (big write path deferred)
 
 ## 设计决策
 
@@ -635,8 +645,14 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - Collection 持有 `OpSequencer*` (堆分配，构造时 new，析构时 delete)，`BlueStore*` 反向指针在 mount/create_collection 时设置
 - Finisher 用 `std::thread` + `std::deque<std::function<void()>>` 实现，简化替代 Ceph 的 Finisher 线程池
 - BlueStoreTransaction 定义 OP_NOP/TOUCH/CREATE/WRITE/ZERO/REMOVE/SETATTR/SETATTRS 8 种 op，3.8 仅实现 NOP/TOUCH/CREATE/SETATTRS dispatch
+- Small write path (3.9): blob reuse 仅搜索 offset 之前、blob_start <= offset 的 extent，简化 Ceph 的双向搜索
+- `_do_write_data` 将跨 AU 写入拆分为多个 per-chunk `_do_write_small` 调用，big write 路径 defer 到 3.10
+- `_do_alloc_write` 对新 blob 调用 `allocated()` 替换 extents，对复用 blob 调用 `dirty_extents().push_back()` 追加新 extents
+- `calc_csum` 接受 `dev_block_size` 参数，通过 `get_chunk_size()` 计算实际 chunk size（max of csum_chunk_size 和 dev_block_size）
+- `_open_bdev` 传入 `_aio_callback` 静态函数作为 AIO 完成回调，替代之前的 nullptr（3.8 需要 AIO 回调驱动状态机）
+- `WriteContext` 用 `std::vector<OldExtent>` 而非 Ceph 的 `boost::intrusive::list`，`_wctx_finish` 中调用 `put_ref` 释放旧 extent 空间
 
 ## 下一步
 
-1. Phase 3.9: Small Write 路径 (`_do_write()`, `_choose_write_options()`, `_do_write_small()`)
-2. Phase 3.10: Big Write 路径 (`_do_write_big()`, `_do_alloc_write()`, `_wctx_finish()`)
+1. Phase 3.10: Big Write 路径 (`_do_write_big()`, aligned multi-AU writes)
+2. Phase 3.11: Read 路径 (`_do_read()`, extent-based read)

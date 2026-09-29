@@ -66,6 +66,10 @@ public:
     void punch_hole(uint64_t offset, uint64_t length,
                     std::vector<OldExtent> *old_extents);
 
+    iterator set_lextent(uint32_t logical_offset, uint32_t blob_offset,
+                         uint32_t length, BlobRef b,
+                         std::vector<OldExtent> *old_extents);
+
     int compress_extent_map(uint64_t offset, uint64_t length);
 
     bool needs_reshard() const { return false; }

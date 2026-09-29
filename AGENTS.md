@@ -106,7 +106,7 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 - `bluestore/bitmap_freelist_manager.h` / `bluestore/bitmap_freelist_manager.cc`: BitmapFreelistManager implementation
 - `bluestore/blue_rocks_env.h` / `bluestore/blue_rocks_env.cc`: BlueRocksEnv (rocksdb::Env adapter for BlueFS)
 - `bluestore/trans_context.h`: TransContext (11-state machine), OpSequencer (per-collection sequencing), BlueStoreTransaction (op batch)
-- `bluestore/bluestore_types.h`: bluestore_pextent_t alias
+- `bluestore/bluestore_types.h`: bluestore_pextent_t alias, calc_csum()
 - `bluestore/CMakeLists.txt`: builds libbluestore.so (SHARED), links common (PUBLIC) + kv (PUBLIC) + blk (PUBLIC) + bluefs (PUBLIC) + RocksDB (PRIVATE)
 - `blk/allocator.h` / `blk/allocator.cc`: Allocator abstract base + factory
 - `blk/avl_allocator.h` / `blk/avl_allocator.cc`: AvlAllocator (interval-tree)
@@ -121,6 +121,7 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 - `tests/bluestore/test_bitmap_freelist_manager.cc`: 15 BitmapFreelistManager tests
 - `tests/bluestore/test_blue_rocks_env.cc`: BlueRocksEnv tests (29 tests)
 - `tests/bluestore/test_trans_context.cc`: TransContext + OpSequencer tests (12 tests)
+- `tests/bluestore/test_write.cc`: Small write path tests (11 tests)
 - `tests/blk/test_avl_allocator.cc`: 18 AvlAllocator tests
 - `tests/blk/test_bitmap_allocator.cc`: 23 BitmapAllocator tests
 - `tests/blk/test_hybrid_allocator.cc`: 17 HybridAllocator tests

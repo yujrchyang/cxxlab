@@ -83,6 +83,19 @@ private:
     void _txc_release_alloc(TransContext *txc);
     void _txc_aio_submit(TransContext *txc);
 
+    int _do_write(TransContext *txc, Collection *ch, OnodeRef o,
+                  uint64_t offset, uint64_t length, bufferlist &bl);
+    void _do_write_data(TransContext *txc, Collection *ch, OnodeRef o,
+                        uint64_t offset, uint64_t length, bufferlist &bl,
+                        WriteContext *wctx);
+    void _do_write_small(TransContext *txc, Collection *ch, OnodeRef o,
+                         uint64_t offset, uint64_t length, bufferlist &bl,
+                         WriteContext *wctx);
+    int _do_alloc_write(TransContext *txc, OnodeRef o, WriteContext *wctx);
+    void _wctx_finish(TransContext *txc, WriteContext *wctx);
+    void _choose_write_options(WriteContext *wctx);
+    void _pad_zeros(bufferlist *bl, uint64_t *offset, uint64_t chunk_size);
+
     void _kv_start();
     void _kv_stop();
     void _kv_sync_thread_main();

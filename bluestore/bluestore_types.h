@@ -292,6 +292,9 @@ public:
     void split(uint32_t blob_offset, bluestore_blob_t &rb);
     bool release_extents(bool all, const PExtentVector &logical, PExtentVector *r);
 
+    void calc_csum(uint64_t b_off, bufferlist &bl,
+                   uint64_t dev_block_size);
+
     DENC_HELPERS
     void bound_encode(size_t &p) const { _denc_friend(*this, p); }
     void encode(buffer::list::contiguous_appender &p) const {

@@ -148,4 +148,14 @@ int ExtentMap::compress_extent_map(uint64_t offset, uint64_t length) {
     return compressed;
 }
 
+ExtentMap::iterator ExtentMap::set_lextent(uint32_t logical_offset,
+                                           uint32_t blob_offset,
+                                           uint32_t length, BlobRef b,
+                                           std::vector<OldExtent> *old_extents) {
+    if (old_extents) {
+        punch_hole(logical_offset, length, old_extents);
+    }
+    return add(logical_offset, blob_offset, length, b);
+}
+
 }  // namespace TOPNSPC

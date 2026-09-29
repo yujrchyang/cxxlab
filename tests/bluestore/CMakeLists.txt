@@ -87,3 +87,15 @@ target_link_libraries(test_trans_context
         GTest::gtest_main
 )
 add_test(NAME test_trans_context COMMAND test_trans_context)
+
+add_executable(test_write test_write.cc)
+target_include_directories(test_write PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_write
+    PRIVATE
+        bluestore
+        kv
+        blk
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_write COMMAND test_write)

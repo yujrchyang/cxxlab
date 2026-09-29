@@ -1,6 +1,7 @@
 #include "bluestore/bluestore.h"
 
 #include <algorithm>
+#include <bit>
 #include <cerrno>
 #include <sstream>
 
@@ -529,6 +530,15 @@ void BlueStore::_txc_add_transaction(TransContext *txc,
             }
             break;
         }
+        case BlueStoreTransaction::Op::OP_WRITE: {
+            auto on = txc->ch->get_onode(op.oid, true);
+            if (on) {
+                bufferlist data = op.data;
+                _do_write(txc, txc->ch, on, op.offset, op.length, data);
+                txc->write_onode(on);
+            }
+            break;
+        }
         case BlueStoreTransaction::Op::OP_SETATTRS: {
             auto on = txc->ch->get_onode(op.oid, true);
             if (on) {
@@ -812,6 +822,275 @@ void BlueStore::_queue_finisher(std::function<void()> fn) {
     std::lock_guard<std::mutex> lg(finisher_lock_);
     finisher_queue_.push_back(std::move(fn));
     finisher_cond_.notify_one();
+}
+
+void BlueStore::_choose_write_options(WriteContext *wctx) {
+    unsigned block_size_order = std::countr_zero(block_size_);
+    wctx->csum_order = block_size_order;
+    wctx->target_blob_size = cfg_.max_blob_size;
+    if (wctx->target_blob_size == 0 ||
+        wctx->target_blob_size < min_alloc_size_) {
+        wctx->target_blob_size = min_alloc_size_;
+    }
+}
+
+void BlueStore::_pad_zeros(bufferlist *bl, uint64_t *offset,
+                           uint64_t chunk_size) {
+    uint64_t front_pad = *offset % chunk_size;
+    if (front_pad) {
+        bufferlist pad;
+        pad.append_zero(front_pad);
+        pad.claim_append(*bl);
+        *bl = std::move(pad);
+        *offset -= front_pad;
+    }
+    uint64_t tail_pad = (*offset + bl->length()) % chunk_size;
+    if (tail_pad) {
+        tail_pad = chunk_size - tail_pad;
+        bl->append_zero(tail_pad);
+    }
+}
+
+int BlueStore::_do_write(TransContext *txc, Collection *ch, OnodeRef o,
+                         uint64_t offset, uint64_t length, bufferlist &bl) {
+    if (length == 0) return 0;
+
+    WriteContext wctx;
+    _choose_write_options(&wctx);
+
+    _do_write_data(txc, ch, o, offset, length, bl, &wctx);
+
+    int r = _do_alloc_write(txc, o, &wctx);
+    if (r < 0) return r;
+
+    _wctx_finish(txc, &wctx);
+
+    uint64_t end = offset + length;
+    if (end > o->onode.size) {
+        o->onode.size = end;
+    }
+
+    o->extent_map.compress_extent_map(offset, length);
+
+    return 0;
+}
+
+void BlueStore::_do_write_data(TransContext *txc, Collection *ch, OnodeRef o,
+                               uint64_t offset, uint64_t length,
+                               bufferlist &bl, WriteContext *wctx) {
+    uint64_t end = offset + length;
+
+    if (offset / min_alloc_size_ == (end - 1) / min_alloc_size_) {
+        _do_write_small(txc, ch, o, offset, length, bl, wctx);
+        return;
+    }
+
+    uint64_t pos = offset;
+    uint64_t bl_pos = 0;
+    while (pos < end) {
+        uint64_t chunk_off = pos % min_alloc_size_;
+        uint64_t chunk_len = std::min(min_alloc_size_ - chunk_off, end - pos);
+
+        bufferlist chunk_bl;
+        chunk_bl.substr_of(bl, bl_pos, chunk_len);
+
+        _do_write_small(txc, ch, o, pos, chunk_len, chunk_bl, wctx);
+
+        pos += chunk_len;
+        bl_pos += chunk_len;
+    }
+}
+
+void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
+                                OnodeRef o, uint64_t offset, uint64_t length,
+                                bufferlist &bl, WriteContext *wctx) {
+    uint64_t alloc_len = min_alloc_size_;
+    uint64_t max_bsize = std::max(wctx->target_blob_size, min_alloc_size_);
+    uint64_t chunk_size = block_size_;
+    uint64_t min_off = offset >= max_bsize ? offset - max_bsize : 0;
+
+    if (bl.is_zero()) {
+        o->extent_map.punch_hole(offset, length, &wctx->old_extents);
+        return;
+    }
+
+    auto it = o->extent_map.seek_lextent(offset);
+    auto search_start = (it != o->extent_map.end())
+        ? it
+        : o->extent_map.begin();
+
+    for (auto ep = search_start; ep != o->extent_map.end(); ++ep) {
+        if (ep->logical_offset >= offset + max_bsize) break;
+        uint64_t bstart = ep->blob_start();
+        if (bstart > offset || bstart < min_off) continue;
+        if (!ep->blob->get_blob().is_mutable()) continue;
+
+        uint64_t b_off = offset - bstart;
+        uint32_t alloc_len32 = alloc_len;
+        if (!ep->blob->can_reuse_blob(min_alloc_size_, max_bsize, b_off,
+                                      &alloc_len32)) {
+            continue;
+        }
+
+        o->extent_map.punch_hole(offset, length, &wctx->old_extents);
+
+        uint64_t b_off0 = b_off;
+        bufferlist padded_bl = bl;
+        _pad_zeros(&padded_bl, &b_off0, chunk_size);
+
+        alloc_len = alloc_len32;
+        wctx->write(offset, ep->blob, alloc_len, b_off0, padded_bl, b_off,
+                    length, false);
+        return;
+    }
+
+    if (search_start != o->extent_map.begin()) {
+        auto rp = std::prev(search_start);
+        while (true) {
+            if (rp->logical_offset >= min_off) {
+                uint64_t bstart = rp->blob_start();
+                if (bstart <= offset && bstart >= min_off &&
+                    rp->blob->get_blob().is_mutable()) {
+                    uint64_t b_off = offset - bstart;
+                    uint32_t alloc_len32 = alloc_len;
+                    if (rp->blob->can_reuse_blob(min_alloc_size_, max_bsize,
+                                                 b_off, &alloc_len32)) {
+                        o->extent_map.punch_hole(offset, length,
+                                                 &wctx->old_extents);
+
+                        uint64_t b_off0 = b_off;
+                        bufferlist padded_bl = bl;
+                        _pad_zeros(&padded_bl, &b_off0, chunk_size);
+
+                        alloc_len = alloc_len32;
+                        wctx->write(offset, rp->blob, alloc_len, b_off0,
+                                    padded_bl, b_off, length, false);
+                        return;
+                    }
+                }
+            }
+            if (rp == o->extent_map.begin()) break;
+            --rp;
+        }
+    }
+
+    uint64_t b_off = offset % alloc_len;
+    uint64_t b_off0 = b_off;
+
+    o->extent_map.punch_hole(offset, length, &wctx->old_extents);
+
+    bufferlist padded_bl = bl;
+    _pad_zeros(&padded_bl, &b_off0, chunk_size);
+
+    BlobRef b = new Blob();
+    b->get();
+
+    wctx->write(offset, b, alloc_len, b_off0, padded_bl, b_off, length, true);
+}
+
+static uint64_t _blob_to_phys(const bluestore_blob_t &blob, uint64_t b_off) {
+    uint64_t off = 0;
+    for (const auto &e : blob.get_extents()) {
+        if (b_off >= off && b_off < off + e.length) {
+            return e.offset + (b_off - off);
+        }
+        off += e.length;
+    }
+    return 0;
+}
+
+int BlueStore::_do_alloc_write(TransContext *txc, OnodeRef o,
+                               WriteContext *wctx) {
+    if (wctx->writes.empty()) return 0;
+
+    uint64_t need = 0;
+    for (auto &wi : wctx->writes) {
+        uint32_t valid_ondisk = 0;
+        for (const auto &e : wi.b->get_blob().get_extents()) {
+            if (e.is_valid()) valid_ondisk += e.length;
+        }
+        need += wi.blob_length - valid_ondisk;
+    }
+
+    PExtentVector prealloc;
+    if (need > 0) {
+        int64_t r = alloc_->allocate(need, min_alloc_size_, 0, 0, &prealloc);
+        if (r < 0) {
+            return -ENOSPC;
+        }
+    }
+
+    size_t prealloc_pos = 0;
+
+    for (auto &wi : wctx->writes) {
+        BlobRef b = wi.b;
+        auto &dblob = b->dirty_blob();
+
+        uint32_t valid_ondisk = 0;
+        for (const auto &e : dblob.get_extents()) {
+            if (e.is_valid()) valid_ondisk += e.length;
+        }
+        uint64_t new_alloc_len = wi.blob_length - valid_ondisk;
+
+        PExtentVector new_extents;
+        uint64_t remaining = new_alloc_len;
+        while (remaining > 0 && prealloc_pos < prealloc.size()) {
+            auto &pe = prealloc[prealloc_pos];
+            uint64_t take = std::min<uint64_t>(pe.length, remaining);
+            new_extents.emplace_back(pe.offset, take);
+            txc->allocated.insert(pe.offset, take);
+            remaining -= take;
+            if (take == pe.length) {
+                ++prealloc_pos;
+            } else {
+                prealloc[prealloc_pos].offset += take;
+                prealloc[prealloc_pos].length -= take;
+            }
+        }
+
+        if (wi.new_blob) {
+            dblob.allocated(0, wi.blob_length, new_extents);
+            if (!dblob.has_csum() && cfg_.csum_type != CSUM_NONE) {
+                dblob.init_csum(cfg_.csum_type, wctx->csum_order,
+                                wi.blob_length);
+            }
+        } else {
+            auto &exts = dblob.dirty_extents();
+            while (!exts.empty() && !exts.back().is_valid()) {
+                exts.pop_back();
+            }
+            for (auto &ne : new_extents) {
+                exts.push_back(ne);
+            }
+        }
+
+        if (dblob.has_csum()) {
+            dblob.calc_csum(wi.b_off, wi.bl, block_size_);
+        }
+
+        b->get_ref(wi.b_off0, wi.length0, min_alloc_size_);
+
+        o->extent_map.set_lextent(wi.logical_offset, wi.b_off0, wi.length0, b,
+                                  nullptr);
+
+        if (wi.bl.length() > 0) {
+            uint64_t phys_off = _blob_to_phys(dblob, wi.b_off);
+            bdev_->aio_write(phys_off, wi.bl, &txc->ioc, false);
+        }
+    }
+
+    return 0;
+}
+
+void BlueStore::_wctx_finish(TransContext *txc, WriteContext *wctx) {
+    for (auto &oe : wctx->old_extents) {
+        PExtentVector released;
+        oe.e.blob->put_ref(oe.e.blob_offset, oe.e.length, &released);
+        for (auto &r : released) {
+            txc->released.insert(r.offset, r.length);
+        }
+    }
+    wctx->old_extents.clear();
 }
 
 }  // namespace TOPNSPC
