@@ -100,6 +100,7 @@ struct TransContext {
     state_t get_state() const { return state_; }
 
     void write_onode(OnodeRef &o) { onodes.insert(o); }
+    void note_removed_object(OnodeRef &o) { onodes.erase(o); }
 
 private:
     state_t state_ = STATE_PREPARE;
@@ -214,10 +215,29 @@ struct BlueStoreTransaction {
         ops.push_back(std::move(op));
     }
 
+    void zero(const ghobject_t &oid, uint64_t off, uint64_t len) {
+        Op op;
+        op.type = Op::OP_ZERO;
+        op.oid = oid;
+        op.offset = off;
+        op.length = len;
+        ops.push_back(std::move(op));
+    }
+
     void remove(const ghobject_t &oid) {
         Op op;
         op.type = Op::OP_REMOVE;
         op.oid = oid;
+        ops.push_back(std::move(op));
+    }
+
+    void setattr(const ghobject_t &oid, const std::string &name,
+                 const bufferptr &val) {
+        Op op;
+        op.type = Op::OP_SETATTR;
+        op.oid = oid;
+        op.attr_name = name;
+        op.attr_value = val;
         ops.push_back(std::move(op));
     }
 

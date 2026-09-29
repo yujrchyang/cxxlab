@@ -88,6 +88,14 @@ void Onode::set_attrs(const std::map<std::string, bufferptr> &attrs) {
     onode.attrs = attrs;
 }
 
+void Onode::set_attr(const std::string &name, const bufferptr &val) {
+    onode.attrs[name] = val;
+}
+
+void Onode::remove_attr(const std::string &name) {
+    onode.attrs.erase(name);
+}
+
 void Onode::get_attr(const std::string &name, bufferptr *value) const {
     auto it = onode.attrs.find(name);
     if (it != onode.attrs.end()) {

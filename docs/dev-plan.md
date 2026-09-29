@@ -312,7 +312,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - Bug 修复: 修正了空洞与数据交错读取时的顺序错误（原实现将所有空洞放在前面，所有数据放在后面）
 - Bug 修复: 修正了 checksum 验证偏移计算（使用 blob-relative offset 而非 physical offset）
 
-### 3.12 KV 提交管道 [MVP]
+### 3.12 KV 提交管道 [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -320,15 +320,25 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 
 - 依赖: 3.11
 - 测试: 完整写入事务 → KV 提交 → sync → finalize → alloc release 全路径
+- 实现状态: 已在 Phase 3.8 中完成，包括 `_txc_write_nodes`、`_txc_finalize_kv`、`_txc_apply_kv`、`_txc_committed_kv`、`_txc_finish`、`_txc_release_alloc` 以及 `kv_sync_thread_main`、`kv_finalize_thread_main`、`finisher_thread_main` 三个后台线程
 
-### 3.13 Zero + Remove + Attrs [MVP]
+### 3.13 Zero + Remove + Attrs [✅]
 
 | 文件 | 内容 |
 | --- | --- |
-| `BlueStore.h/cc` | `_do_zero()`、`_do_remove()`、`_do_setattrs()`、`_do_getattrs()` |
+| `BlueStore.h/cc` | `_do_zero()`、`_do_remove()`、`_do_setattr()`、`getattr()`、`getattrs()` |
+| `onode.h/cc` | `set_attr()`、`remove_attr()` |
+| `trans_context.h` | `zero()`、`setattr()` builder 方法，`note_removed_object()` |
+| `extent_map.cc` | `punch_hole()` 修复：仅将打孔部分加入 `old_extents` |
 
 - 依赖: 3.12
-- 测试: 写入 → zero 部分区域 → 读取验证 → 删除 object → 验证空间释放
+- 测试: 9 个测试用例覆盖 zero + read 验证、zero 扩展 size、remove 对象、remove 释放空间、setattr/getattr、setattrs/getattrs、attrs 持久化、不存在对象读取、zero 后 remove
+- `_do_zero`: 调用 `punch_hole` 移除 extent，`_wctx_finish` 释放物理块，不写入新数据（空洞读取返回零）
+- `_do_remove`: 释放所有 extent，删除 onode KV key，标记 `exists=false`
+- `_do_setattr`: 设置单个属性到 `onode.attrs`，标记 onode dirty
+- `getattr`/`getattrs`: 只读 API，直接从 `onode.attrs` 读取
+- Bug 修复: `punch_hole` 原先将整个 extent 加入 `old_extents`，导致 `_wctx_finish` 释放整个 blob 的物理块（包括未打孔部分）
+- Bug 修复: `_do_read` 按 checksum chunk 边界对齐读取，确保 `verify_csum` 校验正确
 
 ### 3.14 Collection List [MVP]
 
@@ -674,8 +684,17 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
   - Checksum offset computed from blob-relative offset (`req.blob_offset - front_pad`), not physical offset (avoids non-contiguous extent bug)
   - Buffered read via `bdev_->read()` with `buffered=true` (skips alignment check, kernel page cache handles misalignment)
   - Hole handling: `bl.append_zero()` for gaps between extents, inline during walk to preserve ordering
+- BlueStore Zero + Remove + Attrs (Phase 3.13): 9 tests
+  - `_do_zero()`: punch hole in extent map + `_wctx_finish` to release physical blocks, no new data written
+  - `_do_remove()`: release all extents, delete onode KV key, mark `exists=false`
+  - `_do_setattr()`: set single attribute in `onode.attrs`, mark onode dirty
+  - `getattr()`/`getattrs()`: read-only public API, directly reads from `onode.attrs`
+  - `extent_map::punch_hole()` bug fix: only add the punched portion to `old_extents`, not the full extent
+  - `_do_read` alignment fix: align reads to checksum chunk boundaries for correct `verify_csum` validation
+  - `trans_context.h`: added `zero()` and `setattr()` builders, `note_removed_object()` method
+  - `onode.h/cc`: added `set_attr()` and `remove_attr()` methods
 
 ## 下一步
 
-1. Phase 3.12: KV 提交管道 (`_txc_write_nodes`, `_txc_finalize_kv`, `kv_sync_thread`)
-2. Phase 3.13: Zero + Remove + Attrs
+1. Phase 3.14: Collection List (`_collection_list()`, `get_coll_range()`)
+2. Phase 3.15: Deferred Write

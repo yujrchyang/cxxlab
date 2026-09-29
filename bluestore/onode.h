@@ -46,6 +46,8 @@ struct Onode {
     uint64_t get_object_size() const { return onode.size; }
 
     void set_attrs(const std::map<std::string, bufferptr> &attrs);
+    void set_attr(const std::string &name, const bufferptr &val);
+    void remove_attr(const std::string &name);
     void get_attr(const std::string &name, bufferptr *value) const;
     void get_all_attrs(std::map<std::string, bufferptr> *attrs) const;
 };

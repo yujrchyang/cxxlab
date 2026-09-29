@@ -67,22 +67,29 @@ void ExtentMap::punch_hole(uint64_t offset, uint64_t length,
             continue;
         }
 
-        old_extents->emplace_back(e_lo, e_bo, it->length, e_blob);
+        // Calculate the overlap between extent and hole
+        uint64_t punch_lo = std::max((uint64_t)e_lo, offset);
+        uint64_t punch_end = std::min((uint64_t)e_end, end);
+        uint64_t punch_len = punch_end - punch_lo;
+        uint64_t punch_bo = e_bo + (punch_lo - e_lo);
+
+        // Only add the punched portion to old_extents
+        old_extents->emplace_back(punch_lo, punch_bo, punch_len, e_blob);
 
         if (e_lo < offset && e_end > end) {
-            uint32_t new_len = offset - e_lo;
-            uint32_t new_bo = e_bo;
+            // Case 1: extent spans the entire hole - split into head and tail
+            uint32_t head_len = offset - e_lo;
+            uint32_t head_bo = e_bo;
             extent_map_.erase(it);
-            add(e_lo, new_bo, new_len, e_blob);
+            add(e_lo, head_bo, head_len, e_blob);
 
             uint32_t tail_lo = end;
             uint32_t tail_bo = e_bo + (end - e_lo);
             uint32_t tail_len = e_end - end;
             add(tail_lo, tail_bo, tail_len, e_blob);
             break;
-        }
-
-        if (e_lo < offset) {
+        } else if (e_lo < offset) {
+            // Case 2: extent starts before hole - keep head
             uint32_t new_len = offset - e_lo;
             uint32_t new_bo = e_bo;
             extent_map_.erase(it);
@@ -91,20 +98,22 @@ void ExtentMap::punch_hole(uint64_t offset, uint64_t length,
             if (it == extent_map_.end()) {
                 it = extent_map_.begin();
             }
-            continue;
-        }
-
-        if (e_end > end) {
+        } else if (e_end > end) {
+            // Case 3: extent ends after hole - keep tail
             uint32_t new_lo = end;
             uint32_t new_bo = e_bo + (end - e_lo);
             uint32_t new_len = e_end - end;
             extent_map_.erase(it);
             add(new_lo, new_bo, new_len, e_blob);
             break;
+        } else {
+            // Case 4: extent fully within hole - remove entirely
+            extent_map_.erase(it);
+            it = seek_lextent(offset);
+            if (it == extent_map_.end()) {
+                it = extent_map_.begin();
+            }
         }
-
-        extent_map_.erase(it);
-        it = extent_map_.begin();
     }
 }
 

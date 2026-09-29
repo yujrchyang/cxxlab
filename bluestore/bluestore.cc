@@ -539,6 +539,27 @@ void BlueStore::_txc_add_transaction(TransContext *txc,
             }
             break;
         }
+        case BlueStoreTransaction::Op::OP_ZERO: {
+            auto on = txc->ch->get_onode(op.oid, false);
+            if (on) {
+                _do_zero(txc, txc->ch, on, op.offset, op.length);
+            }
+            break;
+        }
+        case BlueStoreTransaction::Op::OP_REMOVE: {
+            auto on = txc->ch->get_onode(op.oid, false);
+            if (on) {
+                _do_remove(txc, txc->ch, on);
+            }
+            break;
+        }
+        case BlueStoreTransaction::Op::OP_SETATTR: {
+            auto on = txc->ch->get_onode(op.oid, true);
+            if (on) {
+                _do_setattr(txc, on, op.attr_name, op.attr_value);
+            }
+            break;
+        }
         case BlueStoreTransaction::Op::OP_SETATTRS: {
             auto on = txc->ch->get_onode(op.oid, true);
             if (on) {
@@ -915,20 +936,25 @@ int BlueStore::_do_read(OnodeRef o, uint64_t offset, uint64_t length,
         uint64_t blob_off = it->blob_offset + (read_off - ext_start);
         BlobRef blob = it->blob;
 
-        uint64_t phys_off = _blob_to_phys(blob->get_blob(), blob_off);
+        uint64_t chunk_size = blob->get_blob().get_chunk_size(block_size_);
+        uint64_t blob_chunk_start = blob_off & ~(chunk_size - 1);
+        uint64_t front_pad = blob_off - blob_chunk_start;
+        uint64_t aligned_len = (front_pad + read_len + chunk_size - 1) &
+            ~(chunk_size - 1);
 
-        uint64_t aligned_off = phys_off & ~(block_size_ - 1);
-        uint64_t front_pad = phys_off - aligned_off;
-        uint64_t aligned_len = (front_pad + read_len + block_size_ - 1) &
-            ~(block_size_ - 1);
+        uint64_t blob_len = blob->get_blob().get_logical_length();
+        if (blob_chunk_start + aligned_len > blob_len) {
+            aligned_len = blob_len - blob_chunk_start;
+        }
+
+        uint64_t phys_off = _blob_to_phys(blob->get_blob(), blob_chunk_start);
 
         bufferlist raw_bl;
-        int r = bdev_->read(aligned_off, aligned_len, &raw_bl, nullptr, true);
+        int r = bdev_->read(phys_off, aligned_len, &raw_bl, nullptr, true);
         if (r < 0) return r;
 
-        if (blob->get_blob().has_csum() && blob_off >= front_pad) {
-            uint64_t csum_off = blob_off - front_pad;
-            int bad = blob->get_blob().verify_csum(csum_off, raw_bl,
+        if (blob->get_blob().has_csum()) {
+            int bad = blob->get_blob().verify_csum(blob_chunk_start, raw_bl,
                                                    block_size_);
             if (bad >= 0) return -EIO;
         }
@@ -942,6 +968,66 @@ int BlueStore::_do_read(OnodeRef o, uint64_t offset, uint64_t length,
     }
 
     return bl.length();
+}
+
+int BlueStore::_do_zero(TransContext *txc, Collection *ch, OnodeRef o,
+                        uint64_t offset, uint64_t length) {
+    WriteContext wctx;
+    o->extent_map.punch_hole(offset, length, &wctx.old_extents);
+    _wctx_finish(txc, &wctx);
+
+    uint64_t end = offset + length;
+    if (end > o->onode.size) {
+        o->onode.size = end;
+    }
+
+    txc->write_onode(o);
+    return 0;
+}
+
+int BlueStore::_do_remove(TransContext *txc, Collection *ch, OnodeRef o) {
+    WriteContext wctx;
+    o->extent_map.punch_hole(0, o->onode.size, &wctx.old_extents);
+    _wctx_finish(txc, &wctx);
+
+    o->exists = false;
+    txc->t->rmkey(PREFIX_OBJ, o->key);
+    txc->note_removed_object(o);
+
+    o->extent_map.clear();
+    o->onode = bluestore_onode_t();
+
+    return 0;
+}
+
+void BlueStore::_do_setattr(TransContext *txc, OnodeRef o,
+                            const std::string &name, const bufferptr &val) {
+    o->set_attr(name, val);
+    txc->write_onode(o);
+}
+
+int BlueStore::getattr(CollectionRef c, const ghobject_t &oid,
+                       const std::string &name, bufferptr *value) {
+    if (!c) return -ENOENT;
+
+    auto o = c->get_onode(oid, false);
+    if (!o || !o->exists) return -ENOENT;
+
+    auto it = o->onode.attrs.find(name);
+    if (it == o->onode.attrs.end()) return -ENODATA;
+    *value = it->second;
+    return 0;
+}
+
+int BlueStore::getattrs(CollectionRef c, const ghobject_t &oid,
+                        std::map<std::string, bufferptr> *attrs) {
+    if (!c) return -ENOENT;
+
+    auto o = c->get_onode(oid, false);
+    if (!o || !o->exists) return -ENOENT;
+
+    o->get_all_attrs(attrs);
+    return 0;
 }
 
 int BlueStore::_do_write(TransContext *txc, Collection *ch, OnodeRef o,

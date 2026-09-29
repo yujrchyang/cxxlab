@@ -52,6 +52,11 @@ public:
     int read(CollectionRef c, const ghobject_t &oid, uint64_t offset,
              uint64_t length, bufferlist &bl);
 
+    int getattr(CollectionRef c, const ghobject_t &oid,
+                const std::string &name, bufferptr *value);
+    int getattrs(CollectionRef c, const ghobject_t &oid,
+                 std::map<std::string, bufferptr> *attrs);
+
     void txc_aio_finish(void *p);
 
 private:
@@ -103,6 +108,12 @@ private:
     void _pad_zeros(bufferlist *bl, uint64_t *offset, uint64_t chunk_size);
 
     int _do_read(OnodeRef o, uint64_t offset, uint64_t length, bufferlist &bl);
+
+    int _do_zero(TransContext *txc, Collection *ch, OnodeRef o,
+                 uint64_t offset, uint64_t length);
+    int _do_remove(TransContext *txc, Collection *ch, OnodeRef o);
+    void _do_setattr(TransContext *txc, OnodeRef o,
+                     const std::string &name, const bufferptr &val);
 
     void _kv_start();
     void _kv_stop();
