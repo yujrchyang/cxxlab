@@ -121,7 +121,7 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 - `tests/bluestore/test_bitmap_freelist_manager.cc`: 15 BitmapFreelistManager tests
 - `tests/bluestore/test_blue_rocks_env.cc`: BlueRocksEnv tests (29 tests)
 - `tests/bluestore/test_trans_context.cc`: TransContext + OpSequencer tests (12 tests)
-- `tests/bluestore/test_write.cc`: Small + Big write path tests (19 tests)
+- `tests/bluestore/test_write.cc`: Small + Big write path + Deferred write tests (22 tests)
 - `tests/bluestore/test_read.cc`: Read path tests (9 tests)
 - `tests/bluestore/test_zero_remove_attrs.cc`: Zero + Remove + Attrs tests (9 tests)
 - `tests/bluestore/test_collection_list.cc`: Collection list tests (10 tests)

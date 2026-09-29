@@ -146,6 +146,10 @@ int BlueStore::mount(const BlueStoreConfig &cfg) {
     if (r < 0)
         goto out_close_alloc;
 
+    r = _deferred_replay();
+    if (r < 0)
+        goto out_close_alloc;
+
     _finisher_start();
     _kv_start();
 
@@ -447,7 +451,13 @@ void BlueStore::_aio_callback(void *handle, void *priv) {
 
 void BlueStore::txc_aio_finish(void *p) {
     auto *txc = static_cast<TransContext *>(p);
-    _txc_state_proc(txc);
+
+    // Handle deferred write AIO completion
+    if (txc->get_state() == TransContext::STATE_DEFERRED_QUEUED) {
+        _deferred_aio_finish(txc);
+    } else {
+        _txc_state_proc(txc);
+    }
 }
 
 TransContext *BlueStore::_txc_create(Collection *c) {
@@ -497,6 +507,7 @@ void BlueStore::_txc_state_proc(TransContext *txc) {
         case TransContext::STATE_KV_DONE:
             if (txc->deferred_txn) {
                 txc->set_state(TransContext::STATE_DEFERRED_QUEUED);
+                _deferred_queue(txc);
                 return;
             }
             txc->set_state(TransContext::STATE_FINISHING);
@@ -699,6 +710,16 @@ int BlueStore::queue_transactions(CollectionRef ch,
 
     _txc_write_nodes(txc, txc->t);
     _txc_finalize_kv(txc, txc->t);
+
+    // Write deferred transaction to WAL before entering state machine
+    if (txc->deferred_txn) {
+        txc->deferred_txn->seq = ++deferred_seq_;
+        bufferlist bl;
+        cxxlab::encode(*txc->deferred_txn, bl);
+        std::string key;
+        key_encode_u64(txc->deferred_txn->seq, &key);
+        txc->t->set(PREFIX_DEFERRED, key, bl);
+    }
 
     if (on_commit) {
         txc->on_commits.push_back(std::move(on_commit));
@@ -1404,7 +1425,17 @@ int BlueStore::_do_alloc_write(TransContext *txc, OnodeRef o,
 
         if (wi.bl.length() > 0) {
             uint64_t phys_off = _blob_to_phys(dblob, wi.b_off);
-            bdev_->aio_write(phys_off, wi.bl, &txc->ioc, false);
+
+            // Deferred write decision: use deferred path for small writes
+            if (wi.bl.length() < cfg_.prefer_deferred_size) {
+                bluestore_deferred_op_t *op =
+                    _get_deferred_op(txc, wi.bl.length());
+                op->op = bluestore_deferred_op_t::OP_WRITE;
+                op->extents.emplace_back(phys_off, wi.bl.length());
+                op->data = wi.bl;
+            } else {
+                bdev_->aio_write(phys_off, wi.bl, &txc->ioc, false);
+            }
         }
     }
 
@@ -1420,6 +1451,112 @@ void BlueStore::_wctx_finish(TransContext *txc, WriteContext *wctx) {
         }
     }
     wctx->old_extents.clear();
+}
+
+// Deferred write implementation
+
+bluestore_deferred_op_t *BlueStore::_get_deferred_op(TransContext *txc,
+                                                     uint64_t len) {
+    if (!txc->deferred_txn) {
+        txc->deferred_txn = new bluestore_deferred_transaction_t;
+    }
+    txc->deferred_txn->ops.push_back(bluestore_deferred_op_t());
+    return &txc->deferred_txn->ops.back();
+}
+
+void BlueStore::_deferred_queue(TransContext *txc) {
+    std::lock_guard<std::mutex> l(deferred_lock_);
+    deferred_queue_.push_back(txc);
+
+    // Count total IOs in this deferred transaction
+    for (auto &op : txc->deferred_txn->ops) {
+        deferred_pending_ios_ += op.extents.size();
+    }
+
+    // Submit immediately (simplified approach)
+    _deferred_submit();
+}
+
+void BlueStore::_deferred_submit() {
+    std::deque<TransContext *> queue;
+    queue.swap(deferred_queue_);
+
+    for (auto *txc : queue) {
+        auto &wt = *txc->deferred_txn;
+        for (auto &op : wt.ops) {
+            uint64_t data_pos = 0;
+            for (auto &e : op.extents) {
+                if (e.offset == bluestore_pextent_t::INVALID_OFFSET) continue;
+
+                uint64_t write_len =
+                    std::min<uint64_t>(e.length, op.data.length() - data_pos);
+                if (write_len == 0) break;
+
+                bufferlist write_bl;
+                write_bl.substr_of(op.data, data_pos, write_len);
+                bdev_->aio_write(e.offset, write_bl, &txc->ioc, false);
+                data_pos += write_len;
+            }
+        }
+
+        if (txc->ioc.has_pending_aios()) {
+            bdev_->aio_submit(&txc->ioc);
+        } else {
+            // No AIOs were submitted, transition directly to CLEANUP
+            txc->set_state(TransContext::STATE_DEFERRED_CLEANUP);
+            _txc_state_proc(txc);
+        }
+    }
+}
+
+void BlueStore::_deferred_aio_finish(TransContext *txc) {
+    // Decrement pending IO counter
+    if (--deferred_pending_ios_ == 0) {
+        // All deferred IOs complete, clean up WAL records
+        std::lock_guard<std::mutex> l(deferred_lock_);
+
+        auto it = db_->get_transaction();
+        for (auto &wt : deferred_queue_) {
+            std::string key;
+            key_encode_u64(wt->deferred_txn->seq, &key);
+            it->rmkey(PREFIX_DEFERRED, key);
+        }
+        db_->submit_transaction_sync(it);
+    }
+
+    // Transition to CLEANUP state
+    txc->set_state(TransContext::STATE_DEFERRED_CLEANUP);
+    _txc_state_proc(txc);
+}
+
+int BlueStore::_deferred_replay() {
+    auto it = db_->get_iterator(PREFIX_DEFERRED);
+    it->seek_to_first();
+
+    int count = 0;
+    while (it->valid()) {
+        bluestore_deferred_transaction_t deferred_txn;
+        bufferlist bl = it->value();
+        auto p = bl.cbegin();
+        cxxlab::decode(deferred_txn, p);
+
+        // Create a transaction and process it
+        auto coll = get_collection(0);  // Use default collection
+        if (!coll) {
+            // Create default collection if needed
+            coll = create_collection(0, 0);
+        }
+
+        TransContext *txc = _txc_create(coll.get());
+        txc->deferred_txn = new bluestore_deferred_transaction_t(deferred_txn);
+        txc->set_state(TransContext::STATE_KV_DONE);
+        _txc_state_proc(txc);
+
+        count++;
+        it->next();
+    }
+
+    return count;
 }
 
 }  // namespace TOPNSPC

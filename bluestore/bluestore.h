@@ -119,6 +119,13 @@ private:
     void _do_setattr(TransContext *txc, OnodeRef o,
                      const std::string &name, const bufferptr &val);
 
+    // Deferred write
+    bluestore_deferred_op_t *_get_deferred_op(TransContext *txc, uint64_t len);
+    void _deferred_queue(TransContext *txc);
+    void _deferred_submit();
+    void _deferred_aio_finish(TransContext *txc);
+    int _deferred_replay();
+
     void _kv_start();
     void _kv_stop();
     void _kv_sync_thread_main();
@@ -164,6 +171,12 @@ private:
     bool kv_finalize_in_progress_ = false;
     std::atomic<bool> kv_finalize_stop_{false};
     std::deque<TransContext *> kv_committing_to_finalize_;
+
+    // Deferred write queue
+    std::atomic<uint64_t> deferred_seq_{0};
+    std::mutex deferred_lock_;
+    std::deque<TransContext *> deferred_queue_;
+    std::atomic<int> deferred_pending_ios_{0};
 
     std::thread finisher_thread_;
     std::mutex finisher_lock_;

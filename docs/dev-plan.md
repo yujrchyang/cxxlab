@@ -349,14 +349,17 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 依赖: 3.7 + KV iterator
 - 测试: 创建多个 object → 按范围分页列出 → 验证结果
 
-### 3.15 Deferred Write [MVP]
+### 3.15 Deferred Write [✅]
 
 | 文件 | 内容 |
 | --- | --- |
-| `BlueStore.h/cc` | `DeferredWriteQueue`、`submit_deferred()`、`process_deferred()`、状态机扩展（DEFERRED_QUEUED/CLEANUP/DONE） |
+| `BlueStore.h/cc` | `_get_deferred_op()`、`_deferred_queue()`、`_deferred_submit()`、`_deferred_aio_finish()`、`_deferred_replay()`、状态机扩展（DEFERRED_QUEUED/CLEANUP/DONE） |
+| `bluestore_config.h` | `prefer_deferred_size` 配置项（默认 64KB） |
 
 - 依赖: 3.12 (KV pipeline) + 3.9 (Small Write)
-- 测试: 小写触发延迟写 → 批量合并 → 刷盘 → 崩溃恢复重放
+- 测试: 3 个新增测试（小写触发延迟写、持久化验证、多次小写）
+- 实现状态: 已完成延迟写核心路径，包括 WAL 记录、延迟队列、批量提交、崩溃恢复重放
+- 简化实现: 相比 Ceph 的复杂 iomap 合并，采用全局队列 + 立即提交的简化策略
 
 ### 3.16 OMap（对象级 key-value）[P1]
 
@@ -700,8 +703,18 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
   - Returns objects in ghobject_t comparison order (bitwise key order)
   - Supports range filtering with start/end bounds and max limit for pagination
   - Test coverage: empty collection, single/multiple objects, pagination, max limit, range filtering, collection isolation, null collection, zero max, persistence across remount
+- BlueStore Deferred Write (Phase 3.15): 3 new tests (22 total write tests)
+  - `bluestore_config.h`: added `prefer_deferred_size` config (default 64KB)
+  - `bluestore.h/cc`: `_get_deferred_op()`, `_deferred_queue()`, `_deferred_submit()`, `_deferred_aio_finish()`, `_deferred_replay()`
+  - State machine: full DEFERRED_QUEUED → DEFERRED_CLEANUP → FINISHING path
+  - WAL record: serialized `bluestore_deferred_transaction_t` written to PREFIX_DEFERRED before KV commit
+  - AIO callback: `txc_aio_finish()` routes to `_deferred_aio_finish()` for deferred writes
+  - Mount recovery: `_deferred_replay()` replays all PREFIX_DEFERRED records after `_open_collections()`
+  - `_do_alloc_write()`: deferred write decision based on `wi.bl.length() < cfg_.prefer_deferred_size`
+  - Simplified from Ceph: global queue + immediate submit (no per-OSR batching, no aggressive mode, no iomap coalescing)
+  - Test coverage: small write triggers deferred path, persistence across remount, multiple small writes
 
 ## 下一步
 
-1. Phase 3.15: Deferred Write (`DeferredWriteQueue`, `submit_deferred()`, `process_deferred()`)
-2. Phase 3.16: OMap（对象级 key-value）
+1. Phase 3.16: OMap（对象级 key-value）(`omap_get()`, `omap_set()`, `omap_rmkeys()`, `omap_get_values()`, `omap_check_keys()` 等 11 个操作)
+2. Phase 3.17: FSCK（文件系统检查）(`fsck()`, `repair()`, `quick_fix()`, `BlueStoreRepairer`, `StoreSpaceTracker`)

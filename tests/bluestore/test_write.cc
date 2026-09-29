@@ -207,8 +207,159 @@ TEST_F(WritePathTest, SequentialAppendBlobReuse) {
 
     auto on = coll->get_onode(oid, false);
     ASSERT_NE(on, nullptr);
-    EXPECT_EQ(on->onode.size, 12288u);
+    EXPECT_EQ(on->onode.size, 12288u);  // 3 writes of 4096 bytes each
     EXPECT_GE(on->extent_map.size(), 1u);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, DeferredWriteSmall) {
+    BlueStore store;
+    auto cfg = make_config();
+    cfg.prefer_deferred_size = 32768;  // 32KB threshold
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 30;
+    oid.oid = "deferred_small";
+
+    // Write 4KB (smaller than prefer_deferred_size)
+    uint64_t write_size = 4096;
+    std::string write_data(write_size, 'D');
+    for (size_t i = 0; i < write_data.size(); ++i) {
+        write_data[i] = 'A' + (i % 26);
+    }
+    bufferlist bl;
+    bl.append(write_data);
+
+    BlueStoreTransaction bt;
+    bt.write(oid, 0, bl.length(), bl);
+
+    std::vector<BlueStoreTransaction> tls;
+    tls.push_back(std::move(bt));
+
+    std::atomic<bool> committed{false};
+    EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+        committed = true;
+    }),
+              0);
+    coll->get_osr()->flush();
+    EXPECT_TRUE(wait_commit(committed));
+
+    // Read back and verify
+    bufferlist read_bl;
+    int r = store.read(coll, oid, 0, write_size, read_bl);
+    EXPECT_EQ(r, (int)write_size);
+    EXPECT_EQ(read_bl.to_str(), write_data);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, DeferredWritePersistence) {
+    BlueStore store;
+    auto cfg = make_config();
+    cfg.prefer_deferred_size = 16384;  // 16KB threshold
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 31;
+    oid.oid = "deferred_persist";
+
+    // Write 8KB (smaller than threshold, should use deferred path)
+    uint64_t write_size = 8192;
+    std::string write_data(write_size, 'P');
+    for (size_t i = 0; i < write_data.size(); ++i) {
+        write_data[i] = '0' + (i % 10);
+    }
+    bufferlist bl;
+    bl.append(write_data);
+
+    BlueStoreTransaction bt;
+    bt.write(oid, 0, bl.length(), bl);
+
+    std::vector<BlueStoreTransaction> tls;
+    tls.push_back(std::move(bt));
+
+    std::atomic<bool> committed{false};
+    EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+        committed = true;
+    }),
+              0);
+    coll->get_osr()->flush();
+    EXPECT_TRUE(wait_commit(committed));
+
+    // Umount and remount to test persistence
+    ASSERT_EQ(store.umount(), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll2 = store.get_collection(1);
+    ASSERT_NE(coll2, nullptr);
+
+    // Read back after remount
+    bufferlist read_bl;
+    int r = store.read(coll2, oid, 0, write_size, read_bl);
+    EXPECT_EQ(r, (int)write_size);
+    EXPECT_EQ(read_bl.to_str(), write_data);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, DeferredWriteMultipleSmall) {
+    BlueStore store;
+    auto cfg = make_config();
+    cfg.prefer_deferred_size = 65536;  // 64KB threshold
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 32;
+    oid.oid = "deferred_multi";
+
+    // Write multiple small chunks
+    for (int i = 0; i < 5; ++i) {
+        uint64_t offset = i * 4096;
+        std::string write_data(4096, 'A' + i);
+        bufferlist bl;
+        bl.append(write_data);
+
+        BlueStoreTransaction bt;
+        bt.write(oid, offset, bl.length(), bl);
+
+        std::vector<BlueStoreTransaction> tls;
+        tls.push_back(std::move(bt));
+
+        std::atomic<bool> committed{false};
+        EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+            committed = true;
+        }),
+                  0);
+        coll->get_osr()->flush();
+        EXPECT_TRUE(wait_commit(committed));
+    }
+
+    // Read back and verify all chunks
+    for (int i = 0; i < 5; ++i) {
+        uint64_t offset = i * 4096;
+        bufferlist read_bl;
+        int r = store.read(coll, oid, offset, 4096, read_bl);
+        EXPECT_EQ(r, 4096);
+        std::string expected(4096, 'A' + i);
+        EXPECT_EQ(read_bl.to_str(), expected);
+    }
 
     ASSERT_EQ(store.umount(), 0);
 }
@@ -396,7 +547,7 @@ TEST_F(WritePathTest, MultipleWritesToOneObject) {
 
     auto on = coll->get_onode(oid, false);
     ASSERT_NE(on, nullptr);
-    EXPECT_EQ(on->onode.size, 20480u);
+    EXPECT_EQ(on->onode.size, 20480u);  // 5 writes of 4096 bytes each
     EXPECT_GE(on->extent_map.size(), 1u);
 
     ASSERT_EQ(store.umount(), 0);
