@@ -50,6 +50,13 @@ struct Onode {
     void remove_attr(const std::string &name);
     void get_attr(const std::string &name, bufferptr *value) const;
     void get_all_attrs(std::map<std::string, bufferptr> *attrs) const;
+
+    // OMap helpers
+    const std::string &get_omap_prefix() const;
+    void get_omap_header(std::string *out) const;
+    void get_omap_key(const std::string &key, std::string *out) const;
+    void get_omap_tail(std::string *out) const;
+    void decode_omap_key(const std::string &key, std::string *user_key) const;
 };
 
 using OnodeRef = std::shared_ptr<Onode>;

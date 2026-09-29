@@ -61,6 +61,18 @@ public:
     int getattrs(CollectionRef c, const ghobject_t &oid,
                  std::map<std::string, bufferptr> *attrs);
 
+    // OMap operations
+    int omap_get(CollectionRef c, const ghobject_t &oid,
+                 bufferlist *header, std::map<std::string, bufferlist> *out);
+    int omap_get_header(CollectionRef c, const ghobject_t &oid,
+                        bufferlist *header);
+    int omap_get_values(CollectionRef c, const ghobject_t &oid,
+                        const std::set<std::string> &keys,
+                        std::map<std::string, bufferlist> *out);
+    int omap_check_keys(CollectionRef c, const ghobject_t &oid,
+                        const std::set<std::string> &keys,
+                        std::set<std::string> *out);
+
     void txc_aio_finish(void *p);
 
 private:
@@ -81,6 +93,8 @@ private:
     int _read_super_meta();
 
     static void _aio_callback(void *handle, void *priv);
+
+    void _assign_nid(TransContext *txc, OnodeRef o);
 
     TransContext *_txc_create(Collection *c);
     void _txc_state_proc(TransContext *txc);
@@ -118,6 +132,14 @@ private:
     int _do_remove(TransContext *txc, Collection *ch, OnodeRef o);
     void _do_setattr(TransContext *txc, OnodeRef o,
                      const std::string &name, const bufferptr &val);
+
+    // OMap operations
+    int _omap_setkeys(TransContext *txc, OnodeRef o, bufferlist &bl);
+    int _omap_setheader(TransContext *txc, OnodeRef o, bufferlist &bl);
+    int _omap_rmkeys(TransContext *txc, OnodeRef o, bufferlist &bl);
+    void _omap_clear(TransContext *txc, OnodeRef o);
+    int _onode_omap_get(const OnodeRef &o, bufferlist *header,
+                        std::map<std::string, bufferlist> *out);
 
     // Deferred write
     bluestore_deferred_op_t *_get_deferred_op(TransContext *txc, uint64_t len);

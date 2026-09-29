@@ -361,7 +361,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 实现状态: 已完成延迟写核心路径，包括 WAL 记录、延迟队列、批量提交、崩溃恢复重放
 - 简化实现: 相比 Ceph 的复杂 iomap 合并，采用全局队列 + 立即提交的简化策略
 
-### 3.16 OMap（对象级 key-value）[P1]
+### 3.16 OMap（对象级 key-value）[✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -369,6 +369,8 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 
 - 依赖: 3.6 (Onode + Collection) + KV
 - 测试: set/get/rmkeys 基本操作 → 迭代器遍历 → 边界条件（空 key、超长 key）
+- 实现状态: 已完成 8 个测试用例，包括 SetAndGetKeys、SetAndGetHeader、RemoveKeys、Clear、GetFull、NonExistentObject、EmptyOMap、CheckKeys
+- 简化实现: 使用 NID-based key 编码和三-分隔符方案（'-' header, '.' entries, '~' tail），相比 Ceph 简化了 per-OSR 批处理
 
 ### 3.17 FSCK（文件系统检查）[P1]
 

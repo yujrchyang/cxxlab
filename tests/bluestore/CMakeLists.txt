@@ -135,3 +135,15 @@ target_link_libraries(test_collection_list
         GTest::gtest_main
 )
 add_test(NAME test_collection_list COMMAND test_collection_list)
+
+add_executable(test_omap test_omap.cc)
+target_include_directories(test_omap PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_omap
+    PRIVATE
+        bluestore
+        kv
+        blk
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_omap COMMAND test_omap)

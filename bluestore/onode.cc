@@ -109,4 +109,44 @@ void Onode::get_all_attrs(std::map<std::string, bufferptr> *attrs) const {
     *attrs = onode.attrs;
 }
 
+// OMap helpers
+
+const std::string &Onode::get_omap_prefix() const {
+    if (onode.is_pgmeta_omap()) {
+        static const std::string pgmeta_prefix = PREFIX_PGMETA_OMAP;
+        return pgmeta_prefix;
+    }
+    static const std::string default_prefix = PREFIX_OMAP;
+    return default_prefix;
+}
+
+void Onode::get_omap_header(std::string *out) const {
+    out->clear();
+    key_encode_u64(onode.nid, out);
+    out->push_back('-');  // Header delimiter: '-' < '.' < '~'
+}
+
+void Onode::get_omap_key(const std::string &key, std::string *out) const {
+    out->clear();
+    key_encode_u64(onode.nid, out);
+    out->push_back('.');  // Entry delimiter
+    out->append(key);     // User key appended directly
+}
+
+void Onode::get_omap_tail(std::string *out) const {
+    out->clear();
+    key_encode_u64(onode.nid, out);
+    out->push_back('~');  // Tail delimiter: '-' < '.' < '~'
+}
+
+void Onode::decode_omap_key(const std::string &key, std::string *user_key) const {
+    // Skip nid (8 bytes) + delimiter (1 byte)
+    size_t pos = sizeof(uint64_t) + 1;
+    if (key.length() > pos) {
+        *user_key = key.substr(pos);
+    } else {
+        user_key->clear();
+    }
+}
+
 }  // namespace TOPNSPC

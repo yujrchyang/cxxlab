@@ -171,6 +171,10 @@ struct BlueStoreTransaction {
             OP_REMOVE = 5,
             OP_SETATTR = 6,
             OP_SETATTRS = 7,
+            OP_OMAP_SETKEYS = 8,
+            OP_OMAP_SETHEADER = 9,
+            OP_OMAP_RMKEYS = 10,
+            OP_OMAP_CLEAR = 11,
         };
         Type type = OP_NOP;
         ghobject_t oid;
@@ -180,6 +184,8 @@ struct BlueStoreTransaction {
         std::string attr_name;
         bufferptr attr_value;
         std::map<std::string, bufferptr> attrs;
+        std::map<std::string, bufferlist> omap_keys;
+        std::set<std::string> omap_rmkeys;
     };
 
     std::vector<Op> ops;
@@ -247,6 +253,39 @@ struct BlueStoreTransaction {
         op.type = Op::OP_SETATTRS;
         op.oid = oid;
         op.attrs = a;
+        ops.push_back(std::move(op));
+    }
+
+    void omap_setkeys(const ghobject_t &oid,
+                      const std::map<std::string, bufferlist> &keys) {
+        Op op;
+        op.type = Op::OP_OMAP_SETKEYS;
+        op.oid = oid;
+        op.omap_keys = keys;
+        ops.push_back(std::move(op));
+    }
+
+    void omap_setheader(const ghobject_t &oid, bufferlist &header) {
+        Op op;
+        op.type = Op::OP_OMAP_SETHEADER;
+        op.oid = oid;
+        op.data = header;
+        ops.push_back(std::move(op));
+    }
+
+    void omap_rmkeys(const ghobject_t &oid,
+                     const std::set<std::string> &keys) {
+        Op op;
+        op.type = Op::OP_OMAP_RMKEYS;
+        op.oid = oid;
+        op.omap_rmkeys = keys;
+        ops.push_back(std::move(op));
+    }
+
+    void omap_clear(const ghobject_t &oid) {
+        Op op;
+        op.type = Op::OP_OMAP_CLEAR;
+        op.oid = oid;
         ops.push_back(std::move(op));
     }
 

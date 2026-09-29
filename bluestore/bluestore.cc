@@ -527,6 +527,20 @@ void BlueStore::_txc_state_proc(TransContext *txc) {
     }
 }
 
+void BlueStore::_assign_nid(TransContext *txc, OnodeRef o) {
+    if (o->onode.nid == 0) {
+        o->onode.nid = ++nid_last_;
+        if (nid_last_ > nid_max_) {
+            nid_max_ = nid_last_ + 1024;
+            bufferlist bl;
+            uint64_t nid_max_val = nid_max_.load();
+            cxxlab::encode(nid_max_val, bl);
+            txc->t->set(PREFIX_SUPER, "nid_max", bl);
+        }
+        txc->write_onode(o);
+    }
+}
+
 void BlueStore::_txc_add_transaction(TransContext *txc,
                                      BlueStoreTransaction *bt) {
     for (auto &op : bt->ops) {
@@ -537,6 +551,7 @@ void BlueStore::_txc_add_transaction(TransContext *txc,
         case BlueStoreTransaction::Op::OP_CREATE: {
             auto on = txc->ch->get_onode(op.oid, true);
             if (on) {
+                _assign_nid(txc, on);
                 txc->write_onode(on);
             }
             break;
@@ -544,6 +559,7 @@ void BlueStore::_txc_add_transaction(TransContext *txc,
         case BlueStoreTransaction::Op::OP_WRITE: {
             auto on = txc->ch->get_onode(op.oid, true);
             if (on) {
+                _assign_nid(txc, on);
                 bufferlist data = op.data;
                 _do_write(txc, txc->ch, on, op.offset, op.length, data);
                 txc->write_onode(on);
@@ -567,6 +583,7 @@ void BlueStore::_txc_add_transaction(TransContext *txc,
         case BlueStoreTransaction::Op::OP_SETATTR: {
             auto on = txc->ch->get_onode(op.oid, true);
             if (on) {
+                _assign_nid(txc, on);
                 _do_setattr(txc, on, op.attr_name, op.attr_value);
             }
             break;
@@ -574,7 +591,56 @@ void BlueStore::_txc_add_transaction(TransContext *txc,
         case BlueStoreTransaction::Op::OP_SETATTRS: {
             auto on = txc->ch->get_onode(op.oid, true);
             if (on) {
+                _assign_nid(txc, on);
                 on->set_attrs(op.attrs);
+                txc->write_onode(on);
+            }
+            break;
+        }
+        case BlueStoreTransaction::Op::OP_OMAP_SETKEYS: {
+            auto on = txc->ch->get_onode(op.oid, true);
+            if (on) {
+                _assign_nid(txc, on);
+                bufferlist bl;
+                uint32_t num = op.omap_keys.size();
+                cxxlab::encode(num, bl);
+                for (const auto &[key, value] : op.omap_keys) {
+                    cxxlab::encode(key, bl);
+                    cxxlab::encode(value, bl);
+                }
+                _omap_setkeys(txc, on, bl);
+                txc->write_onode(on);
+            }
+            break;
+        }
+        case BlueStoreTransaction::Op::OP_OMAP_SETHEADER: {
+            auto on = txc->ch->get_onode(op.oid, true);
+            if (on) {
+                _assign_nid(txc, on);
+                bufferlist bl = op.data;
+                _omap_setheader(txc, on, bl);
+                txc->write_onode(on);
+            }
+            break;
+        }
+        case BlueStoreTransaction::Op::OP_OMAP_RMKEYS: {
+            auto on = txc->ch->get_onode(op.oid, false);
+            if (on) {
+                bufferlist bl;
+                uint32_t num = op.omap_rmkeys.size();
+                cxxlab::encode(num, bl);
+                for (const auto &key : op.omap_rmkeys) {
+                    cxxlab::encode(key, bl);
+                }
+                _omap_rmkeys(txc, on, bl);
+                txc->write_onode(on);
+            }
+            break;
+        }
+        case BlueStoreTransaction::Op::OP_OMAP_CLEAR: {
+            auto on = txc->ch->get_onode(op.oid, false);
+            if (on) {
+                _omap_clear(txc, on);
                 txc->write_onode(on);
             }
             break;
@@ -633,7 +699,7 @@ void BlueStore::_txc_finalize_kv(TransContext *txc, Transaction t) {
 }
 
 void BlueStore::_txc_apply_kv(TransContext *txc) {
-    db_->submit_transaction(txc->t);
+    db_->submit_transaction_sync(txc->t);
     txc->set_state(TransContext::STATE_KV_SUBMITTED);
     {
         std::lock_guard<std::mutex> lg(txc->osr->qlock);
@@ -1048,6 +1114,220 @@ int BlueStore::getattrs(CollectionRef c, const ghobject_t &oid,
     if (!o || !o->exists) return -ENOENT;
 
     o->get_all_attrs(attrs);
+    return 0;
+}
+
+// OMap operations
+
+int BlueStore::_omap_setkeys(TransContext *txc, OnodeRef o, bufferlist &bl) {
+    if (!o->onode.has_omap()) {
+        o->onode.set_omap_flags();
+        txc->write_onode(o);
+
+        const std::string &prefix = o->get_omap_prefix();
+        std::string key_tail;
+        bufferlist tail;
+        o->get_omap_tail(&key_tail);
+        txc->t->set(prefix, key_tail, tail);
+    }
+
+    const std::string &prefix = o->get_omap_prefix();
+    std::string final_key;
+    o->get_omap_key(std::string(), &final_key);
+    size_t base_key_len = final_key.size();
+
+    auto p = bl.cbegin();
+    uint32_t num;
+    cxxlab::decode(num, p);
+    while (num--) {
+        std::string key;
+        bufferlist value;
+        cxxlab::decode(key, p);
+        cxxlab::decode(value, p);
+        final_key.resize(base_key_len);
+        final_key += key;
+        txc->t->set(prefix, final_key, value);
+    }
+    return 0;
+}
+
+int BlueStore::_omap_setheader(TransContext *txc, OnodeRef o, bufferlist &bl) {
+    if (!o->onode.has_omap()) {
+        o->onode.set_omap_flags();
+        txc->write_onode(o);
+
+        const std::string &prefix = o->get_omap_prefix();
+        std::string key_tail;
+        bufferlist tail;
+        o->get_omap_tail(&key_tail);
+        txc->t->set(prefix, key_tail, tail);
+    }
+
+    const std::string &prefix = o->get_omap_prefix();
+    std::string key;
+    o->get_omap_header(&key);
+    txc->t->set(prefix, key, bl);
+    return 0;
+}
+
+int BlueStore::_omap_rmkeys(TransContext *txc, OnodeRef o, bufferlist &bl) {
+    if (!o->onode.has_omap()) {
+        return 0;
+    }
+
+    const std::string &prefix = o->get_omap_prefix();
+    std::string final_key;
+    o->get_omap_key(std::string(), &final_key);
+    size_t base_key_len = final_key.size();
+
+    auto p = bl.cbegin();
+    uint32_t num;
+    cxxlab::decode(num, p);
+    while (num--) {
+        std::string key;
+        cxxlab::decode(key, p);
+        final_key.resize(base_key_len);
+        final_key += key;
+        txc->t->rmkey(prefix, final_key);
+    }
+    return 0;
+}
+
+void BlueStore::_omap_clear(TransContext *txc, OnodeRef o) {
+    if (!o->onode.has_omap()) {
+        return;
+    }
+
+    const std::string &omap_prefix = o->get_omap_prefix();
+    std::string prefix, tail;
+    o->get_omap_header(&prefix);
+    o->get_omap_tail(&tail);
+    txc->t->rm_range_keys(omap_prefix, prefix, tail);
+    txc->t->rmkey(omap_prefix, tail);
+    o->onode.clear_omap_flag();
+}
+
+int BlueStore::_onode_omap_get(const OnodeRef &o, bufferlist *header,
+                               std::map<std::string, bufferlist> *out) {
+    if (!o->onode.has_omap()) {
+        return 0;
+    }
+
+    const std::string &prefix = o->get_omap_prefix();
+    std::string head, tail;
+    o->get_omap_header(&head);
+    o->get_omap_tail(&tail);
+
+    IteratorBounds bounds;
+    bounds.lower_bound = head;
+    bounds.upper_bound = tail;
+
+    auto it = db_->get_iterator(prefix, 0, bounds);
+    it->lower_bound(head);
+
+    while (it->valid()) {
+        std::string key = it->key();
+        if (key == head) {
+            if (header) {
+                *header = it->value();
+            }
+        } else if (key >= tail) {
+            break;
+        } else {
+            std::string user_key;
+            o->decode_omap_key(key, &user_key);
+            if (out) {
+                (*out)[user_key] = it->value();
+            }
+        }
+        it->next();
+    }
+
+    return 0;
+}
+
+int BlueStore::omap_get(CollectionRef c, const ghobject_t &oid,
+                        bufferlist *header,
+                        std::map<std::string, bufferlist> *out) {
+    if (!c) return -ENOENT;
+
+    auto o = c->get_onode(oid, false);
+    if (!o || !o->exists) return -ENOENT;
+
+    return _onode_omap_get(o, header, out);
+}
+
+int BlueStore::omap_get_header(CollectionRef c, const ghobject_t &oid,
+                               bufferlist *header) {
+    if (!c) return -ENOENT;
+
+    auto o = c->get_onode(oid, false);
+    if (!o || !o->exists) return -ENOENT;
+
+    if (!o->onode.has_omap()) {
+        return 0;
+    }
+
+    std::string head;
+    o->get_omap_header(&head);
+    return db_->get(o->get_omap_prefix(), head, header);
+}
+
+int BlueStore::omap_get_values(CollectionRef c, const ghobject_t &oid,
+                               const std::set<std::string> &keys,
+                               std::map<std::string, bufferlist> *out) {
+    if (!c) return -ENOENT;
+
+    auto o = c->get_onode(oid, false);
+    if (!o || !o->exists) return -ENOENT;
+
+    if (!o->onode.has_omap()) {
+        return 0;
+    }
+
+    const std::string &prefix = o->get_omap_prefix();
+    std::string final_key;
+    o->get_omap_key(std::string(), &final_key);
+    size_t base_key_len = final_key.size();
+
+    for (const auto &key : keys) {
+        final_key.resize(base_key_len);
+        final_key += key;
+        bufferlist val;
+        if (db_->get(prefix, final_key, &val) >= 0) {
+            (*out)[key] = val;
+        }
+    }
+
+    return 0;
+}
+
+int BlueStore::omap_check_keys(CollectionRef c, const ghobject_t &oid,
+                               const std::set<std::string> &keys,
+                               std::set<std::string> *out) {
+    if (!c) return -ENOENT;
+
+    auto o = c->get_onode(oid, false);
+    if (!o || !o->exists) return -ENOENT;
+
+    if (!o->onode.has_omap()) {
+        return 0;
+    }
+
+    const std::string &prefix = o->get_omap_prefix();
+    std::string final_key;
+    o->get_omap_key(std::string(), &final_key);
+    size_t base_key_len = final_key.size();
+
+    for (const auto &key : keys) {
+        final_key.resize(base_key_len);
+        final_key += key;
+        bufferlist val;
+        if (db_->get(prefix, final_key, &val) >= 0) {
+            out->insert(key);
+        }
+    }
+
     return 0;
 }
 

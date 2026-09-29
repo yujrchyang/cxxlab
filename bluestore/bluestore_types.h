@@ -359,6 +359,20 @@ struct bluestore_onode_t {
     void clear_flag(unsigned f) { flags &= ~f; }
     bool has_omap() const { return has_flag(FLAG_OMAP); }
 
+    void set_omap_flags(bool pgmeta = false) {
+        if (pgmeta) {
+            set_flag(FLAG_OMAP | FLAG_PGMETA_OMAP);
+        } else {
+            set_flag(FLAG_OMAP);
+        }
+    }
+
+    void clear_omap_flag() {
+        clear_flag(FLAG_OMAP | FLAG_PGMETA_OMAP | FLAG_PERPOOL_OMAP | FLAG_PERPG_OMAP);
+    }
+
+    bool is_pgmeta_omap() const { return has_flag(FLAG_PGMETA_OMAP); }
+
     DENC(bluestore_onode_t, v, p) {
         DENC_START(1, 1, p);
         denc(v.nid, p);
