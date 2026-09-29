@@ -144,7 +144,10 @@ bool BitmapFreelistManager::enumerate_next(
     if (enumerate_offset_ == 0 && enumerate_bl_pos_ == 0) {
         enumerate_p_ = kvdb->get_iterator(bitmap_prefix_);
         enumerate_p_->lower_bound(std::string());
-        cxxlab_assert(enumerate_p_->valid());
+        if (!enumerate_p_->valid()) {
+            // Freelist is empty
+            return false;
+        }
         std::string k = enumerate_p_->key();
         enumerate_offset_ = key_decode_u64(k.data());
         enumerate_bl_ = enumerate_p_->value();

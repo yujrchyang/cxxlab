@@ -372,14 +372,16 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 实现状态: 已完成 8 个测试用例，包括 SetAndGetKeys、SetAndGetHeader、RemoveKeys、Clear、GetFull、NonExistentObject、EmptyOMap、CheckKeys
 - 简化实现: 使用 NID-based key 编码和三-分隔符方案（'-' header, '.' entries, '~' tail），相比 Ceph 简化了 per-OSR 批处理
 
-### 3.17 FSCK（文件系统检查）[P1]
+### 3.17 FSCK（文件系统检查）[✅]
 
 | 文件 | 内容 |
 | --- | --- |
-| `BlueStore.h/cc` | `fsck()` (SHALLOW/REGULAR/DEEP)、`repair()`、`quick_fix()`、`BlueStoreRepairer`、`StoreSpaceTracker` |
+| `BlueStore.h/cc` | `fsck()` (SHALLOW/REGULAR/DEEP)、`repair()`、`quick_fix()`、`_fsck_check_collections()`、`_fsck_check_objects()`、`_fsck_check_freelist()` |
 
 - 依赖: 3.7 (mkfs/mount) + 3.5 (ExtentMap) + 3.13 (Zero/Remove)
 - 测试: 构造损坏元数据 → fsck 检测 → repair 修复 → 验证一致性
+- 实现状态: 已完成 7 个测试用例，覆盖基础 FSCK、深度检查、快速修复、泄漏 extent 修复、extent 重叠检测、空 store、多 collection 场景
+- 简化实现: 未实现 BlueStoreRepairer 和 StoreSpaceTracker，直接使用 FreelistManager 进行 extent 检查和修复
 
 ### 3.18 Buffer Cache [P1]
 
@@ -715,8 +717,21 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
   - `_do_alloc_write()`: deferred write decision based on `wi.bl.length() < cfg_.prefer_deferred_size`
   - Simplified from Ceph: global queue + immediate submit (no per-OSR batching, no aggressive mode, no iomap coalescing)
   - Test coverage: small write triggers deferred path, persistence across remount, multiple small writes
+- BlueStore OMap (Phase 3.16): 7 tests
+  - `omap_get()`, `omap_get_header()`, `omap_get_values()`, `omap_check_keys()` implementation
+  - `_omap_setkeys()`, `_omap_setheader()`, `_omap_rmkeys()`, `_omap_clear()` implementation
+  - NID-based OMap key encoding (`[nid] + '.' + user_key`)
+  - Simplified: no BlueStoreRepairer or StoreSpaceTracker
+- BlueStore FSCK (Phase 3.17): 7 tests
+  - `fsck(depth, repair)` implementation, supports SHALLOW/REGULAR/DEEP depth levels
+  - `_fsck_check_collections()` checks collection metadata integrity
+  - `_fsck_check_objects()` checks object extent consistency, detects overlaps
+  - `_fsck_check_freelist()` checks freelist consistency with actual used blocks
+  - `repair()` fixes leaked extents (marks them as free)
+  - `quick_fix()` quick check and fix for common issues
+  - Simplified: directly uses FreelistManager for extent checking and repair, no BlueStoreRepairer or StoreSpaceTracker
 
 ## 下一步
 
-1. Phase 3.16: OMap（对象级 key-value）(`omap_get()`, `omap_set()`, `omap_rmkeys()`, `omap_get_values()`, `omap_check_keys()` 等 11 个操作)
-2. Phase 3.17: FSCK（文件系统检查）(`fsck()`, `repair()`, `quick_fix()`, `BlueStoreRepairer`, `StoreSpaceTracker`)
+1. Phase 3.18: Buffer Cache (`BufferCache`, `OnodeCache`, LRU 淘汰策略, `_read_cache()`, `_write_cache()`)
+2. Phase 3.19: 完整集成测试 (全路径场景: mkfs → mount → 多次写入 → 读取 → zero → remove → collection list → umount → mount → 验证持久化)

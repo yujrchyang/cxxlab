@@ -147,3 +147,15 @@ target_link_libraries(test_omap
         GTest::gtest_main
 )
 add_test(NAME test_omap COMMAND test_omap)
+
+add_executable(test_fsck test_fsck.cc)
+target_include_directories(test_fsck PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_fsck
+    PRIVATE
+        bluestore
+        kv
+        blk
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_fsck COMMAND test_fsck)

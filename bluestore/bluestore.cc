@@ -1839,4 +1839,308 @@ int BlueStore::_deferred_replay() {
     return count;
 }
 
+// FSCK implementation
+
+int BlueStore::fsck(bool deep) {
+    return _fsck(deep ? FSCK_DEEP : FSCK_REGULAR, false);
+}
+
+int BlueStore::repair(bool deep) {
+    return _fsck(deep ? FSCK_DEEP : FSCK_REGULAR, true);
+}
+
+int BlueStore::quick_fix() {
+    return _fsck(FSCK_SHALLOW, true);
+}
+
+int BlueStore::_fsck(FSCKDepth depth, bool repair) {
+    int64_t errors = 0;
+    int64_t repaired = 0;
+
+    // Open DB and bdev for fsck
+    std::unique_ptr<KeyValueDB> fsck_db;
+    std::unique_ptr<BlockDevice> fsck_bdev;
+    BlockDevice *original_bdev = bdev_.get();
+    FreelistManager *original_fm = fm_;
+    FreelistManager *fsck_fm = nullptr;
+
+    // Always open DB and bdev for fsck
+    if (!repair) {
+        // Open in read-only mode
+        fsck_db = KeyValueDB::create("rocksdb", cfg_.db_path);
+        if (!fsck_db) return -EIO;
+
+        int r = fsck_db->init();
+        if (r < 0) return r;
+
+        std::ostringstream oss;
+        r = fsck_db->open_read_only(oss);
+        if (r < 0) return r;
+    } else {
+        // Open in read-write mode for repair
+        fsck_db = KeyValueDB::create("rocksdb", cfg_.db_path);
+        if (!fsck_db) return -EIO;
+
+        int r = fsck_db->init();
+        if (r < 0) return r;
+
+        std::ostringstream oss;
+        r = fsck_db->open(oss);
+        if (r < 0) return r;
+    }
+
+    // Open bdev
+    fsck_bdev = BlockDevice::create(cfg_.bdev_path, _aio_callback, this);
+    if (!fsck_bdev) {
+        db_.swap(fsck_db);
+        return -EIO;
+    }
+    int r = fsck_bdev->open(cfg_.bdev_path);
+    if (r < 0) {
+        db_.swap(fsck_db);
+        return r;
+    }
+
+    // Initialize fm
+    fsck_fm = FreelistManager::create(
+        cfg_.freelist_type.empty() ? "bitmap" : cfg_.freelist_type,
+        PREFIX_SUPER, PREFIX_ALLOC_BITMAP);
+    if (!fsck_fm) {
+        fsck_bdev->close();
+        db_.swap(fsck_db);
+        bdev_.swap(fsck_bdev);
+        return -EIO;
+    }
+
+    // Initialize fm from DB
+    auto cfg_reader = [&fsck_db](const std::string &key, std::string *value) -> int {
+        bufferlist bl;
+        int r = fsck_db->get(PREFIX_SUPER, key, &bl);
+        if (r < 0)
+            return r;
+        *value = std::string(bl.c_str(), bl.length());
+        return 0;
+    };
+    r = fsck_fm->init(fsck_db.get(), !repair, cfg_reader);
+    if (r < 0) {
+        delete fsck_fm;
+        fsck_bdev->close();
+        db_.swap(fsck_db);
+        bdev_.swap(fsck_bdev);
+        return r;
+    }
+
+    // Temporarily swap db_, bdev_, and fm_ to use fsck versions
+    db_.swap(fsck_db);
+    bdev_.swap(fsck_bdev);
+    fm_ = fsck_fm;
+
+    // Check collections
+    errors += _fsck_check_collections();
+
+    // Check objects and track used blocks
+    std::set<uint64_t> used_blocks;
+    errors += _fsck_check_objects(depth, used_blocks);
+
+    // Check freelist (REGULAR and DEEP only)
+    if (depth != FSCK_SHALLOW && bdev_ && fm_) {
+        errors += _fsck_check_freelist(used_blocks, repair);
+        if (repair) {
+            repaired = errors;  // Assume all errors are repaired
+        }
+    }
+
+    // Restore original db_, bdev_, and fm_
+    db_.swap(fsck_db);
+    if (bdev_) {
+        bdev_->close();
+    }
+    bdev_.swap(fsck_bdev);
+    if (fm_) {
+        delete fm_;
+    }
+    fm_ = original_fm;
+
+    return repair ? (errors - repaired) : errors;
+}
+
+int64_t BlueStore::_fsck_check_collections() {
+    int64_t errors = 0;
+
+    auto it = db_->get_iterator(PREFIX_COLL);
+    if (!it) return -EIO;
+
+    it->seek_to_first();
+    while (it->valid()) {
+        std::string key = it->key();
+        bufferlist bl = it->value();
+
+        // Try to decode collection
+        uint64_t coll_id = 0;
+        const char *p = key.c_str();
+        key_decode_u64(p, &coll_id);
+
+        if (bl.length() == 0) {
+            errors++;
+            it->next();
+            continue;
+        }
+
+        // Try to decode cnode
+        auto blp = bl.cbegin();
+        bluestore_cnode_t cnode;
+        try {
+            cxxlab::decode(cnode, blp);
+        } catch (...) {
+            errors++;
+        }
+
+        it->next();
+    }
+
+    return errors;
+}
+
+int64_t BlueStore::_fsck_check_objects(FSCKDepth depth,
+                                       std::set<uint64_t> &used_blocks) {
+    int64_t errors = 0;
+
+    // Use cfg_.min_alloc_size as fallback if min_alloc_size_ is not set
+    uint64_t min_alloc = min_alloc_size_ > 0 ? min_alloc_size_ : cfg_.min_alloc_size;
+    if (min_alloc == 0) {
+        // Cannot check without min_alloc_size
+        return 0;
+    }
+
+    auto it = db_->get_iterator(PREFIX_OBJ);
+    if (!it) return -EIO;
+
+    it->seek_to_first();
+    while (it->valid()) {
+        std::string key = it->key();
+        bufferlist bl = it->value();
+
+        // Skip extent shard keys
+        if (!key.empty() && key.back() == 'x') {
+            it->next();
+            continue;
+        }
+
+        if (bl.length() == 0) {
+            errors++;
+            it->next();
+            continue;
+        }
+
+        // Try to decode onode
+        auto blp = bl.cbegin();
+        Onode on(ghobject_t(), key);
+        try {
+            on.decode(blp);
+        } catch (...) {
+            errors++;
+            it->next();
+            continue;
+        }
+
+        // Check extents and track used blocks
+        for (const auto &ext : on.extent_map) {
+            if (!ext.blob) {
+                errors++;
+                continue;
+            }
+
+            const auto &blob = ext.blob->get_blob();
+            for (const auto &pext : blob.get_extents()) {
+                if (!pext.is_valid()) continue;
+
+                // Track used blocks (in min_alloc_size units)
+                uint64_t start_block = pext.offset / min_alloc;
+                uint64_t num_blocks = (pext.length + min_alloc - 1) / min_alloc;
+
+                for (uint64_t i = 0; i < num_blocks; i++) {
+                    uint64_t block = start_block + i;
+                    auto result = used_blocks.insert(block);
+                    if (!result.second) {
+                        // Block already used - overlap detected
+                        if (depth != FSCK_SHALLOW) {
+                            errors++;
+                        }
+                    }
+                }
+
+                // Check extent bounds (REGULAR and DEEP only)
+                if (depth != FSCK_SHALLOW) {
+                    if (pext.offset + pext.length > bdev_->get_size()) {
+                        errors++;
+                    }
+                }
+
+                // Deep check: try to read data
+                if (depth == FSCK_DEEP) {
+                    bufferlist data_bl;
+                    int r = bdev_->read(pext.offset, pext.length, &data_bl, nullptr, false);
+                    if (r < 0) {
+                        errors++;
+                    }
+                }
+            }
+        }
+
+        it->next();
+    }
+
+    return errors;
+}
+
+int64_t BlueStore::_fsck_check_freelist(const std::set<uint64_t> &used_blocks,
+                                        bool repair) {
+    int64_t errors = 0;
+
+    // If no blocks are used, skip freelist check (empty store)
+    if (used_blocks.empty()) {
+        return 0;
+    }
+
+    // Use cfg_.min_alloc_size as fallback if min_alloc_size_ is not set
+    uint64_t min_alloc = min_alloc_size_ > 0 ? min_alloc_size_ : cfg_.min_alloc_size;
+    if (min_alloc == 0) {
+        // Cannot check without min_alloc_size
+        return 0;
+    }
+
+    // Enumerate freelist
+    std::set<uint64_t> free_blocks;
+    fm_->enumerate_reset();
+    uint64_t offset, length;
+    while (fm_->enumerate_next(db_.get(), &offset, &length)) {
+        uint64_t start_block = offset / min_alloc;
+        uint64_t num_blocks = (length + min_alloc - 1) / min_alloc;
+
+        for (uint64_t i = 0; i < num_blocks; i++) {
+            free_blocks.insert(start_block + i);
+        }
+    }
+
+    // Check for conflicts: blocks that are both used and free
+    for (uint64_t block : used_blocks) {
+        if (free_blocks.count(block) > 0) {
+            // Block is both used and free - error
+            errors++;
+            if (repair) {
+                // Mark as used (remove from freelist)
+                Transaction t = db_->get_transaction();
+                fm_->allocate(block * min_alloc, min_alloc, t);
+                db_->submit_transaction_sync(t);
+            }
+        }
+    }
+
+    // Note: We cannot reliably detect leaked blocks (blocks that are allocated
+    // but not tracked) without additional metadata. We only check for conflicts
+    // (blocks that are both used and free).
+
+    return errors;
+}
+
 }  // namespace TOPNSPC

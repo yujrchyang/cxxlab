@@ -73,6 +73,19 @@ public:
                         const std::set<std::string> &keys,
                         std::set<std::string> *out);
 
+    // FSCK
+    enum FSCKDepth {
+        FSCK_SHALLOW,  // Quick checks only
+        FSCK_REGULAR,  // Standard checks including extent overlap
+        FSCK_DEEP,     // Deep checks including data read verification
+    };
+
+    int fsck(bool deep);
+    int repair(bool deep);
+    int quick_fix();
+
+    void set_config(const BlueStoreConfig &cfg) { cfg_ = cfg; }
+
     void txc_aio_finish(void *p);
 
 private:
@@ -140,6 +153,14 @@ private:
     void _omap_clear(TransContext *txc, OnodeRef o);
     int _onode_omap_get(const OnodeRef &o, bufferlist *header,
                         std::map<std::string, bufferlist> *out);
+
+    // FSCK internal methods
+    int _fsck(FSCKDepth depth, bool repair);
+    int64_t _fsck_check_collections();
+    int64_t _fsck_check_objects(FSCKDepth depth,
+                                std::set<uint64_t> &used_blocks);
+    int64_t _fsck_check_freelist(const std::set<uint64_t> &used_blocks,
+                                 bool repair);
 
     // Deferred write
     bluestore_deferred_op_t *_get_deferred_op(TransContext *txc, uint64_t len);
