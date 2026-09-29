@@ -64,7 +64,7 @@ protected:
         cfg.bdev_path = store_path_ + "/block";
         cfg.min_alloc_size = 65536;
         cfg.block_size = 4096;
-        cfg.max_blob_size = 65536;
+        cfg.max_blob_size = 262144;  // 256KB
         cfg.allocator_type = "bitmap";
         return cfg;
     }
@@ -682,6 +682,316 @@ TEST_F(WritePathTest, WriteAtOffsetDataIntegrity) {
 
     ::free(buf);
     ::close(fd);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, BigWriteAligned) {
+    BlueStore store;
+    auto cfg = make_config();
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 20;
+    oid.oid = "big_aligned";
+
+    uint64_t write_size = 2 * cfg.min_alloc_size;
+    bufferlist data;
+    std::string payload(write_size, 'B');
+    data.append(payload);
+
+    BlueStoreTransaction bt;
+    bt.write(oid, 0, write_size, data);
+
+    std::vector<BlueStoreTransaction> tls;
+    tls.push_back(std::move(bt));
+
+    std::atomic<bool> committed{false};
+    EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+        committed = true;
+    }),
+              0);
+    coll->get_osr()->flush();
+    EXPECT_TRUE(wait_commit(committed));
+
+    auto on = coll->get_onode(oid, false);
+    ASSERT_NE(on, nullptr);
+    EXPECT_EQ(on->onode.size, write_size);
+    EXPECT_GE(on->extent_map.size(), 1u);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, BigWriteUnaligned) {
+    BlueStore store;
+    auto cfg = make_config();
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 21;
+    oid.oid = "big_unaligned";
+
+    uint64_t write_offset = 4096;
+    uint64_t write_size = 2 * cfg.min_alloc_size + 8192;
+    bufferlist data;
+    std::string payload(write_size, 'U');
+    data.append(payload);
+
+    BlueStoreTransaction bt;
+    bt.write(oid, write_offset, write_size, data);
+
+    std::vector<BlueStoreTransaction> tls;
+    tls.push_back(std::move(bt));
+
+    std::atomic<bool> committed{false};
+    EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+        committed = true;
+    }),
+              0);
+    coll->get_osr()->flush();
+    EXPECT_TRUE(wait_commit(committed));
+
+    auto on = coll->get_onode(oid, false);
+    ASSERT_NE(on, nullptr);
+    EXPECT_EQ(on->onode.size, write_offset + write_size);
+    EXPECT_GE(on->extent_map.size(), 2u);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, BigWriteMultipleChunks) {
+    BlueStore store;
+    auto cfg = make_config();
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 22;
+    oid.oid = "big_multi_chunk";
+
+    uint64_t write_size = 3 * cfg.max_blob_size;
+    bufferlist data;
+    std::string payload(write_size, 'M');
+    data.append(payload);
+
+    BlueStoreTransaction bt;
+    bt.write(oid, 0, write_size, data);
+
+    std::vector<BlueStoreTransaction> tls;
+    tls.push_back(std::move(bt));
+
+    std::atomic<bool> committed{false};
+    EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+        committed = true;
+    }),
+              0);
+    coll->get_osr()->flush();
+    EXPECT_TRUE(wait_commit(committed));
+
+    auto on = coll->get_onode(oid, false);
+    ASSERT_NE(on, nullptr);
+    EXPECT_EQ(on->onode.size, write_size);
+    EXPECT_GE(on->extent_map.size(), 3u);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, BigWriteDataIntegrity) {
+    BlueStore store;
+    auto cfg = make_config();
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 23;
+    oid.oid = "big_data_integrity";
+
+    uint64_t write_size = cfg.min_alloc_size + 4096;
+    std::string write_data(write_size, 'D');
+    for (size_t i = 0; i < write_data.size(); ++i) {
+        write_data[i] = 'A' + (i % 26);
+    }
+    bufferlist data;
+    data.append(write_data);
+
+    BlueStoreTransaction bt;
+    bt.write(oid, 0, write_size, data);
+
+    std::vector<BlueStoreTransaction> tls;
+    tls.push_back(std::move(bt));
+
+    std::atomic<bool> committed{false};
+    EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+        committed = true;
+    }),
+              0);
+    coll->get_osr()->flush();
+    EXPECT_TRUE(wait_commit(committed));
+
+    auto on = coll->get_onode(oid, false);
+    ASSERT_NE(on, nullptr);
+
+    uint64_t total_read = 0;
+    std::string all_read;
+
+    for (auto it = on->extent_map.begin(); it != on->extent_map.end(); ++it) {
+        auto &extents = it->blob->get_blob().get_extents();
+        for (const auto &e : extents) {
+            if (!e.is_valid()) {
+                continue;
+            }
+            uint64_t phys_off = e.offset;
+            uint64_t read_len = e.length;
+
+            int fd = ::open(cfg.bdev_path.c_str(), O_RDONLY | O_DIRECT);
+            ASSERT_GE(fd, 0);
+
+            uint64_t aligned_len = (read_len + 4095) & ~4095ULL;
+            void *buf = nullptr;
+            ASSERT_EQ(::posix_memalign(&buf, 4096, aligned_len), 0);
+
+            ssize_t nr = ::pread(fd, buf, aligned_len, phys_off);
+            EXPECT_EQ(nr, (ssize_t)aligned_len);
+
+            uint64_t valid_len = std::min<uint64_t>(read_len,
+                                                    write_size - total_read);
+            all_read.append(static_cast<char *>(buf), valid_len);
+            total_read += valid_len;
+
+            ::free(buf);
+            ::close(fd);
+        }
+    }
+
+    EXPECT_EQ(total_read, write_size);
+    EXPECT_EQ(all_read, write_data);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, BigWritePersistence) {
+    BlueStore store;
+    auto cfg = make_config();
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 24;
+    oid.oid = "big_persist";
+
+    uint64_t write_size = 2 * cfg.min_alloc_size;
+    bufferlist data;
+    std::string payload(write_size, 'P');
+    data.append(payload);
+
+    BlueStoreTransaction bt;
+    bt.write(oid, 0, write_size, data);
+
+    std::vector<BlueStoreTransaction> tls;
+    tls.push_back(std::move(bt));
+
+    std::atomic<bool> committed{false};
+    EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+        committed = true;
+    }),
+              0);
+    coll->get_osr()->flush();
+    EXPECT_TRUE(wait_commit(committed));
+
+    ASSERT_EQ(store.umount(), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll2 = store.get_collection(1);
+    ASSERT_NE(coll2, nullptr);
+
+    auto on = coll2->get_onode(oid, false);
+    ASSERT_NE(on, nullptr);
+    EXPECT_EQ(on->onode.size, write_size);
+    EXPECT_GE(on->extent_map.size(), 1u);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, BigWriteOverwrite) {
+    BlueStore store;
+    auto cfg = make_config();
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 25;
+    oid.oid = "big_overwrite";
+
+    uint64_t write_size = 2 * cfg.min_alloc_size;
+
+    {
+        bufferlist data;
+        std::string payload(write_size, 'X');
+        data.append(payload);
+
+        BlueStoreTransaction bt;
+        bt.write(oid, 0, write_size, data);
+        std::vector<BlueStoreTransaction> tls;
+        tls.push_back(std::move(bt));
+
+        std::atomic<bool> committed{false};
+        EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+            committed = true;
+        }),
+                  0);
+        coll->get_osr()->flush();
+        EXPECT_TRUE(wait_commit(committed));
+    }
+
+    {
+        bufferlist data;
+        std::string payload(write_size, 'Y');
+        data.append(payload);
+
+        BlueStoreTransaction bt;
+        bt.write(oid, 0, write_size, data);
+        std::vector<BlueStoreTransaction> tls;
+        tls.push_back(std::move(bt));
+
+        std::atomic<bool> committed{false};
+        EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+            committed = true;
+        }),
+                  0);
+        coll->get_osr()->flush();
+        EXPECT_TRUE(wait_commit(committed));
+    }
+
+    auto on = coll->get_onode(oid, false);
+    ASSERT_NE(on, nullptr);
+    EXPECT_EQ(on->onode.size, write_size);
+    EXPECT_GE(on->extent_map.size(), 1u);
 
     ASSERT_EQ(store.umount(), 0);
 }

@@ -91,6 +91,9 @@ private:
     void _do_write_small(TransContext *txc, Collection *ch, OnodeRef o,
                          uint64_t offset, uint64_t length, bufferlist &bl,
                          WriteContext *wctx);
+    void _do_write_big(TransContext *txc, Collection *ch, OnodeRef o,
+                       uint64_t offset, uint64_t length, bufferlist &bl,
+                       uint64_t bl_start, WriteContext *wctx);
     int _do_alloc_write(TransContext *txc, OnodeRef o, WriteContext *wctx);
     void _wctx_finish(TransContext *txc, WriteContext *wctx);
     void _choose_write_options(WriteContext *wctx);

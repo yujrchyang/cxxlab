@@ -289,7 +289,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 依赖: 3.8 + ExtentMap + Allocator
 - 测试: 写入 1 个 AU 内数据 → 验证 extent 正确 → 覆盖已有 extent → 验证旧 extent 进入 released
 
-### 3.10 Big Write 路径 [MVP]
+### 3.10 Big Write 路径 [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -606,6 +606,11 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
   - `_do_alloc_write()`: batch allocation, init_csum/calc_csum, set_lextent, AIO submission
   - `_wctx_finish()`: put_ref on old extents, record released physical extents in txc->released
   - `_do_write_data()`: splits cross-AU writes into per-chunk small writes (big write path deferred)
+- BlueStore Big Write Path (Phase 3.10): 6 additional tests (19 total write tests)
+  - `bluestore_config.h`: `max_blob_size` default 64KB → 256KB
+  - `_do_write_data()`: rewritten as Ceph-style head/middle/tail three-way split
+  - `_do_write_big()`: while loop over max_bsize-aligned chunks, forward+reverse blob reuse search, zero detection, new blob fallback
+  - `_do_alloc_write()` already supports `blob_length > min_alloc_size` via batch allocation
 
 ## 设计决策
 
@@ -646,7 +651,9 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - Finisher 用 `std::thread` + `std::deque<std::function<void()>>` 实现，简化替代 Ceph 的 Finisher 线程池
 - BlueStoreTransaction 定义 OP_NOP/TOUCH/CREATE/WRITE/ZERO/REMOVE/SETATTR/SETATTRS 8 种 op，3.8 仅实现 NOP/TOUCH/CREATE/SETATTRS dispatch
 - Small write path (3.9): blob reuse 仅搜索 offset 之前、blob_start <= offset 的 extent，简化 Ceph 的双向搜索
-- `_do_write_data` 将跨 AU 写入拆分为多个 per-chunk `_do_write_small` 调用，big write 路径 defer 到 3.10
+- `_do_write_data` 将跨 AU 写入拆分为 head(small) + middle(big) + tail(small)，big write 路径在 `_do_write_big` 内部 while 循环按 max_bsize chunking（方案 A，与 Ceph 一致）
+- `_do_write_big` 对每个 chunk 做前向+反向 blob reuse 搜索，无复用时新建 blob，b_off 始终为 0
+- `max_blob_size` 默认 256KB（Ceph 默认 512KB），使 big write 路径有意义地区别于 small write
 - `_do_alloc_write` 对新 blob 调用 `allocated()` 替换 extents，对复用 blob 调用 `dirty_extents().push_back()` 追加新 extents
 - `calc_csum` 接受 `dev_block_size` 参数，通过 `get_chunk_size()` 计算实际 chunk size（max of csum_chunk_size 和 dev_block_size）
 - `_open_bdev` 传入 `_aio_callback` 静态函数作为 AIO 完成回调，替代之前的 nullptr（3.8 需要 AIO 回调驱动状态机）
@@ -654,5 +661,5 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 
 ## 下一步
 
-1. Phase 3.10: Big Write 路径 (`_do_write_big()`, aligned multi-AU writes)
-2. Phase 3.11: Read 路径 (`_do_read()`, extent-based read)
+1. Phase 3.11: Read 路径 (`_do_read()`, extent-based read from block device)
+2. Phase 3.12: KV 提交管道 (`_txc_write_nodes`, `_txc_finalize_kv`, `kv_sync_thread`)
