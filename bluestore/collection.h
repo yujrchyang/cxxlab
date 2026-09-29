@@ -13,6 +13,8 @@
 namespace TOPNSPC {
 
 class KeyValueDB;
+class OpSequencer;
+class BlueStore;
 
 class OnodeSpace {
 public:
@@ -37,10 +39,9 @@ private:
 
 class Collection {
 public:
-    Collection(KeyValueDB *db, uint64_t coll_id)
-        : db_(db), coll_id_(coll_id), onode_space_(1000) {}
+    Collection(KeyValueDB *db, uint64_t coll_id);
 
-    ~Collection() = default;
+    ~Collection();
 
     Collection(const Collection &) = delete;
     Collection &operator=(const Collection &) = delete;
@@ -56,6 +57,13 @@ public:
 
     KeyValueDB *get_db() const { return db_; }
 
+    OpSequencer *get_osr() const { return osr_; }
+
+    BlueStore *get_store() const { return store_; }
+    void set_store(BlueStore *s) { store_ = s; }
+
+    std::mutex &get_lock() { return lock_; }
+
 private:
     std::string encode_onode_key(const ghobject_t &oid);
 
@@ -64,6 +72,8 @@ private:
     bluestore_cnode_t cnode_;
     OnodeSpace onode_space_;
     std::mutex lock_;
+    OpSequencer *osr_;
+    BlueStore *store_ = nullptr;
 };
 
 using CollectionRef = std::shared_ptr<Collection>;

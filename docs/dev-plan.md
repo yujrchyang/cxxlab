@@ -271,7 +271,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 依赖: 3.6 + FreelistManager + Allocator + BlockDevice
 - 测试: mkfs → mount → 验证超级块、collections、allocator 状态正确
 
-### 3.8 TransContext + OpSequencer [MVP]
+### 3.8 TransContext + OpSequencer [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -588,6 +588,14 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
   - `MigrationEngine`: migrate_tier + compact + background thread
   - `BtierObserver`: spdlog + stats + trace
   - `recover_internal`: single-pass replay with switch dispatch (was 5-pass)
+- BlueStore TransContext + OpSequencer (Phase 3.8): 12 tests
+  - `trans_context.h`: `TransContext` (11-state machine), `OpSequencer` (per-collection sequencing), `BlueStoreTransaction` (op batch)
+  - `collection.h/cc`: added `OpSequencer*` + `BlueStore*` back-pointer
+  - `bluestore.h/cc`: full transaction pipeline — `_txc_create`, `_txc_state_proc`, `_txc_finish_io`, `_txc_write_nodes`, `_txc_finalize_kv`, `_txc_apply_kv`, `_txc_committed_kv`, `_txc_finish`, `_txc_release_alloc`
+  - 3 threads: `kv_sync_thread` (submit + sync), `kv_finalize_thread` (post-commit state transitions), `finisher_thread` (on_commit callbacks)
+  - AIO callback wired via `_aio_callback` → `txc_aio_finish` → `_txc_state_proc`
+  - `_txc_finish_io` ordering: backward walk to find earliest consecutive IO_DONE, forward walk to process (matches Ceph's intrusive list approach using std::deque)
+  - `queue_transactions()`: top-level entry point accepting `BlueStoreTransaction` vector + on_commit callback
 
 ## 设计决策
 
@@ -621,8 +629,14 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - BitmapAllocator Pimpl: `AllocatorLevel01Loose`/`AllocatorLevel02` 移入 .cc，header 从 166→52 行，bitmap 内部实现不再泄漏给 includer
 - btier stats 统一: `MigrationStats` 定义在 `btier_types.h`，`MigrationEngine`/`BtierEngine` 共用，消除三重定义 + 字段级拷贝
 - btier recover_internal 单次遍历: 5 次 for 循环合并为 1 次 for + switch，op 处理顺序不变
+- TransContext 11 态状态机保留完整枚举 (PREPARE→DONE)，3.8 实现非 deferred 路径 (DEFERRED_QUEUED/CLEANUP/DONE 在 3.15 实现)
+- OpSequencer 使用 `std::deque<TransContext*>` 替代 Ceph 的 `boost::intrusive::list`，`_txc_finish_io` 用 `std::find` + 双向遍历实现顺序保证
+- `_txc_finish_io` 顺序算法: 向后遍历找到最早连续 IO_DONE 的起点 (遇到 state < IO_DONE 返回阻塞，遇到 state > IO_DONE 停止回溯)，向前遍历处理所有 IO_DONE
+- Collection 持有 `OpSequencer*` (堆分配，构造时 new，析构时 delete)，`BlueStore*` 反向指针在 mount/create_collection 时设置
+- Finisher 用 `std::thread` + `std::deque<std::function<void()>>` 实现，简化替代 Ceph 的 Finisher 线程池
+- BlueStoreTransaction 定义 OP_NOP/TOUCH/CREATE/WRITE/ZERO/REMOVE/SETATTR/SETATTRS 8 种 op，3.8 仅实现 NOP/TOUCH/CREATE/SETATTRS dispatch
 
 ## 下一步
 
-1. Phase 3.1: bluestore_types (bluestore_pextent_t, bluestore_blob_t, bluestore_onode_t, bluestore_cnode_t + DENC)
-2. Phase 3.2: BlueStoreConfig struct init + file load
+1. Phase 3.9: Small Write 路径 (`_do_write()`, `_choose_write_options()`, `_do_write_small()`)
+2. Phase 3.10: Big Write 路径 (`_do_write_big()`, `_do_alloc_write()`, `_wctx_finish()`)

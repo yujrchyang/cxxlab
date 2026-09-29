@@ -75,3 +75,15 @@ target_link_libraries(test_blue_rocks_env
         GTest::gtest_main
 )
 add_test(NAME test_blue_rocks_env COMMAND test_blue_rocks_env)
+
+add_executable(test_trans_context test_trans_context.cc)
+target_include_directories(test_trans_context PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_trans_context
+    PRIVATE
+        bluestore
+        kv
+        blk
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_trans_context COMMAND test_trans_context)

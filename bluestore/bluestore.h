@@ -1,15 +1,21 @@
 #pragma once
 
 #include <atomic>
+#include <condition_variable>
+#include <deque>
+#include <functional>
 #include <map>
 #include <memory>
 #include <mutex>
 #include <string>
+#include <thread>
+#include <vector>
 
-#include "bluestore_config.h"
-#include "bluestore_constants.h"
-#include "bluestore_types.h"
-#include "collection.h"
+#include "bluestore/bluestore_config.h"
+#include "bluestore/bluestore_constants.h"
+#include "bluestore/bluestore_types.h"
+#include "bluestore/collection.h"
+#include "bluestore/trans_context.h"
 #include "kv/key_value_db.h"
 
 namespace TOPNSPC {
@@ -39,6 +45,12 @@ public:
 
     KeyValueDB *get_db() const { return db_.get(); }
 
+    int queue_transactions(CollectionRef ch,
+                           std::vector<BlueStoreTransaction> &tls,
+                           std::function<void()> on_commit = nullptr);
+
+    void txc_aio_finish(void *p);
+
 private:
     int _open_bdev(const std::string &path);
     void _close_bdev();
@@ -55,6 +67,31 @@ private:
     int _open_collections();
 
     int _read_super_meta();
+
+    static void _aio_callback(void *handle, void *priv);
+
+    TransContext *_txc_create(Collection *c);
+    void _txc_state_proc(TransContext *txc);
+    void _txc_add_transaction(TransContext *txc,
+                              BlueStoreTransaction *bt);
+    void _txc_finish_io(TransContext *txc);
+    void _txc_write_nodes(TransContext *txc, Transaction t);
+    void _txc_finalize_kv(TransContext *txc, Transaction t);
+    void _txc_apply_kv(TransContext *txc);
+    void _txc_committed_kv(TransContext *txc);
+    void _txc_finish(TransContext *txc);
+    void _txc_release_alloc(TransContext *txc);
+    void _txc_aio_submit(TransContext *txc);
+
+    void _kv_start();
+    void _kv_stop();
+    void _kv_sync_thread_main();
+    void _kv_finalize_thread_main();
+
+    void _finisher_start();
+    void _finisher_stop();
+    void _finisher_thread_main();
+    void _queue_finisher(std::function<void()> fn);
 
     BlueStoreConfig cfg_;
     bool mounted_ = false;
@@ -76,6 +113,27 @@ private:
 
     std::map<uint64_t, CollectionRef> coll_map_;
     std::mutex coll_lock_;
+
+    std::thread kv_sync_thread_;
+    std::thread kv_finalize_thread_;
+    std::mutex kv_lock_;
+    std::condition_variable kv_cond_;
+    bool kv_sync_in_progress_ = false;
+    std::atomic<bool> kv_stop_{false};
+    std::deque<TransContext *> kv_queue_;
+    std::deque<TransContext *> kv_queue_unsubmitted_;
+
+    std::mutex kv_finalize_lock_;
+    std::condition_variable kv_finalize_cond_;
+    bool kv_finalize_in_progress_ = false;
+    std::atomic<bool> kv_finalize_stop_{false};
+    std::deque<TransContext *> kv_committing_to_finalize_;
+
+    std::thread finisher_thread_;
+    std::mutex finisher_lock_;
+    std::condition_variable finisher_cond_;
+    std::deque<std::function<void()>> finisher_queue_;
+    std::atomic<bool> finisher_stop_{false};
 };
 
 }  // namespace TOPNSPC
