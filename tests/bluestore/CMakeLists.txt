@@ -123,3 +123,15 @@ target_link_libraries(test_zero_remove_attrs
         GTest::gtest_main
 )
 add_test(NAME test_zero_remove_attrs COMMAND test_zero_remove_attrs)
+
+add_executable(test_collection_list test_collection_list.cc)
+target_include_directories(test_collection_list PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_collection_list
+    PRIVATE
+        bluestore
+        kv
+        blk
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_collection_list COMMAND test_collection_list)

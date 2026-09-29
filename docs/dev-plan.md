@@ -340,7 +340,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - Bug 修复: `punch_hole` 原先将整个 extent 加入 `old_extents`，导致 `_wctx_finish` 释放整个 blob 的物理块（包括未打孔部分）
 - Bug 修复: `_do_read` 按 checksum chunk 边界对齐读取，确保 `verify_csum` 校验正确
 
-### 3.14 Collection List [MVP]
+### 3.14 Collection List [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -685,16 +685,23 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
   - Buffered read via `bdev_->read()` with `buffered=true` (skips alignment check, kernel page cache handles misalignment)
   - Hole handling: `bl.append_zero()` for gaps between extents, inline during walk to preserve ordering
 - BlueStore Zero + Remove + Attrs (Phase 3.13): 9 tests
-  - `_do_zero()`: punch hole in extent map + `_wctx_finish` to release physical blocks, no new data written
-  - `_do_remove()`: release all extents, delete onode KV key, mark `exists=false`
-  - `_do_setattr()`: set single attribute in `onode.attrs`, mark onode dirty
-  - `getattr()`/`getattrs()`: read-only public API, directly reads from `onode.attrs`
+  - `_do_zero()`: punch hole in extent map, release physical blocks, no new data written
+  - `_do_remove()`: release all extents, delete onode, mark non-existent
+  - `_do_setattr()`: set single attribute on onode
+  - `getattr()`/`getattrs()`: read-only public API for attributes
   - `extent_map::punch_hole()` bug fix: only add the punched portion to `old_extents`, not the full extent
   - `_do_read` alignment fix: align reads to checksum chunk boundaries for correct `verify_csum` validation
   - `trans_context.h`: added `zero()` and `setattr()` builders, `note_removed_object()` method
   - `onode.h/cc`: added `set_attr()` and `remove_attr()` methods
+- BlueStore Collection List (Phase 3.14): 10 tests
+  - `collection_list()` public API: iterate through objects in a collection with pagination support
+  - Uses KV iterator with PREFIX_OBJ bounds to efficiently scan onodes
+  - Filters by collection ID (pool field) and skips extent shard keys
+  - Returns objects in ghobject_t comparison order (bitwise key order)
+  - Supports range filtering with start/end bounds and max limit for pagination
+  - Test coverage: empty collection, single/multiple objects, pagination, max limit, range filtering, collection isolation, null collection, zero max, persistence across remount
 
 ## 下一步
 
-1. Phase 3.14: Collection List (`_collection_list()`, `get_coll_range()`)
-2. Phase 3.15: Deferred Write
+1. Phase 3.15: Deferred Write (`DeferredWriteQueue`, `submit_deferred()`, `process_deferred()`)
+2. Phase 3.16: OMap（对象级 key-value）

@@ -124,6 +124,7 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 - `tests/bluestore/test_write.cc`: Small + Big write path tests (19 tests)
 - `tests/bluestore/test_read.cc`: Read path tests (9 tests)
 - `tests/bluestore/test_zero_remove_attrs.cc`: Zero + Remove + Attrs tests (9 tests)
+- `tests/bluestore/test_collection_list.cc`: Collection list tests (10 tests)
 - `tests/blk/test_avl_allocator.cc`: 18 AvlAllocator tests
 - `tests/blk/test_bitmap_allocator.cc`: 23 BitmapAllocator tests
 - `tests/blk/test_hybrid_allocator.cc`: 17 HybridAllocator tests

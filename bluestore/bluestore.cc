@@ -1030,6 +1030,74 @@ int BlueStore::getattrs(CollectionRef c, const ghobject_t &oid,
     return 0;
 }
 
+int BlueStore::collection_list(CollectionRef c, const ghobject_t &start,
+                               const ghobject_t &end, int max,
+                               std::vector<ghobject_t> *ls, ghobject_t *next) {
+    if (!c) return -ENOENT;
+    if (max <= 0) return 0;
+
+    std::lock_guard<std::mutex> lg(c->get_lock());
+
+    std::string start_key, end_key;
+    key_encode_object(start, &start_key);
+    key_encode_object(end, &end_key);
+
+    IteratorBounds bounds;
+    bounds.lower_bound = start_key;
+    bounds.upper_bound = end_key;
+
+    auto it = db_->get_iterator(PREFIX_OBJ, 0, bounds);
+    if (!it) return 0;
+
+    it->seek_to_first();
+
+    int count = 0;
+    while (it->valid()) {
+        std::string key = it->key();
+
+        if (!key.empty() && key.back() == EXTENT_SHARD_KEY_SUFFIX) {
+            it->next();
+            continue;
+        }
+
+        ghobject_t oid;
+        int r = key_decode_object(key, &oid);
+        if (r < 0) {
+            it->next();
+            continue;
+        }
+
+        if (oid.pool != (int64_t)c->get_coll_id()) {
+            it->next();
+            continue;
+        }
+
+        if (oid >= end) break;
+        if (oid < start) {
+            it->next();
+            continue;
+        }
+
+        if (count >= max) {
+            if (next) *next = oid;
+            return 0;
+        }
+
+        ls->push_back(oid);
+        count++;
+
+        it->next();
+    }
+
+    if (next) {
+        *next = ghobject_t();
+        next->pool = c->get_coll_id();
+        next->hash = UINT32_MAX;
+    }
+
+    return 0;
+}
+
 int BlueStore::_do_write(TransContext *txc, Collection *ch, OnodeRef o,
                          uint64_t offset, uint64_t length, bufferlist &bl) {
     if (length == 0) return 0;

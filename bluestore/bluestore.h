@@ -52,6 +52,10 @@ public:
     int read(CollectionRef c, const ghobject_t &oid, uint64_t offset,
              uint64_t length, bufferlist &bl);
 
+    int collection_list(CollectionRef c, const ghobject_t &start,
+                        const ghobject_t &end, int max,
+                        std::vector<ghobject_t> *ls, ghobject_t *next);
+
     int getattr(CollectionRef c, const ghobject_t &oid,
                 const std::string &name, bufferptr *value);
     int getattrs(CollectionRef c, const ghobject_t &oid,
