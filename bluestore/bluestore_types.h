@@ -294,6 +294,8 @@ public:
 
     void calc_csum(uint64_t b_off, bufferlist &bl,
                    uint64_t dev_block_size);
+    int verify_csum(uint64_t b_off, bufferlist &bl,
+                    uint64_t dev_block_size) const;
 
     DENC_HELPERS
     void bound_encode(size_t &p) const { _denc_friend(*this, p); }

@@ -99,3 +99,15 @@ target_link_libraries(test_write
         GTest::gtest_main
 )
 add_test(NAME test_write COMMAND test_write)
+
+add_executable(test_read test_read.cc)
+target_include_directories(test_read PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_read
+    PRIVATE
+        bluestore
+        kv
+        blk
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_read COMMAND test_read)

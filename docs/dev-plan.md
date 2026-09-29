@@ -298,14 +298,19 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 依赖: 3.9
 - 测试: 写入多 AU 对齐数据 → 验证 blob 的 physical extents → 校验和正确
 
-### 3.11 读取路径 [MVP]
+### 3.11 读取路径 [✅]
 
 | 文件 | 内容 |
 | --- | --- |
-| `BlueStore.h/cc` | `_do_read()`、`_read_cache()`、`_prepare_read_ioc()`、`_generate_read_result_bl()` |
+| `BlueStore.h/cc` | `read()`、`_do_read()`、`verify_csum()` |
 
-- 依赖: 3.10 + ExtentMap fault_range + BlockDevice 读
-- 测试: 写入 → 读取 → 比较数据 → 校验和验证 → 部分读取（offset/length 不对齐）
+- 依赖: 3.10 + BlockDevice 读
+- 测试: 9 个测试用例覆盖基本读取、部分读取、未对齐读取、多 extent 读取、越界读取、校验和验证、不存在对象读取、空洞读取、交错空洞数据读取
+- 简化实现: 跳过缓存层（P1 阶段实现），直接从块设备读取数据
+- 校验和验证: 读取时自动验证 CRC32C 校验和，失败返回 -EIO
+- 对齐处理: 读取时自动对齐到 block_size，结果裁剪返回用户请求范围
+- Bug 修复: 修正了空洞与数据交错读取时的顺序错误（原实现将所有空洞放在前面，所有数据放在后面）
+- Bug 修复: 修正了 checksum 验证偏移计算（使用 blob-relative offset 而非 physical offset）
 
 ### 3.12 KV 提交管道 [MVP]
 
@@ -658,8 +663,19 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - `calc_csum` 接受 `dev_block_size` 参数，通过 `get_chunk_size()` 计算实际 chunk size（max of csum_chunk_size 和 dev_block_size）
 - `_open_bdev` 传入 `_aio_callback` 静态函数作为 AIO 完成回调，替代之前的 nullptr（3.8 需要 AIO 回调驱动状态机）
 - `WriteContext` 用 `std::vector<OldExtent>` 而非 Ceph 的 `boost::intrusive::list`，`_wctx_finish` 中调用 `put_ref` 释放旧 extent 空间
+- Read path (3.11): 跳过 Ceph 的三阶段流水线（`_read_cache` / `_prepare_read_ioc` / `_generate_read_result_bl`），简化为单次 extent map 遍历 + 同步块设备读取
+- `_do_read` 使用单次遍历模式：遍历 extent map 时同步读取数据并追加到 `bl`，空洞用 `append_zero` 内联填充，保证空洞与数据的正确交错顺序（修复了分两阶段处理导致的排序 bug）
+- `verify_csum` 从 blob-relative offset (`req.blob_offset - front_pad`) 计算校验偏移，而非从 physical offset 计算（避免非连续 extent 场景下的偏移错误）
+- Read 路径使用 buffered IO (`bdev->read(..., buffered=true)`)，跳过对齐检查，由内核页缓存处理未对齐请求
+- BlueStore Read Path (Phase 3.11): 9 tests
+  - `bluestore_types.h/cc`: `verify_csum()` — mirrors `calc_csum()`, iterates chunks computing CRC32C and comparing against stored values
+  - `bluestore.h/cc`: `read()` public API, `_do_read()` core read logic
+  - `_do_read()`: single-pass extent map walk, synchronous block device reads, inline checksum verification, correct hole/data ordering
+  - Checksum offset computed from blob-relative offset (`req.blob_offset - front_pad`), not physical offset (avoids non-contiguous extent bug)
+  - Buffered read via `bdev_->read()` with `buffered=true` (skips alignment check, kernel page cache handles misalignment)
+  - Hole handling: `bl.append_zero()` for gaps between extents, inline during walk to preserve ordering
 
 ## 下一步
 
-1. Phase 3.11: Read 路径 (`_do_read()`, extent-based read from block device)
-2. Phase 3.12: KV 提交管道 (`_txc_write_nodes`, `_txc_finalize_kv`, `kv_sync_thread`)
+1. Phase 3.12: KV 提交管道 (`_txc_write_nodes`, `_txc_finalize_kv`, `kv_sync_thread`)
+2. Phase 3.13: Zero + Remove + Attrs

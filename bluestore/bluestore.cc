@@ -851,6 +851,99 @@ void BlueStore::_pad_zeros(bufferlist *bl, uint64_t *offset,
     }
 }
 
+static uint64_t _blob_to_phys(const bluestore_blob_t &blob, uint64_t b_off) {
+    uint64_t off = 0;
+    for (const auto &e : blob.get_extents()) {
+        if (b_off >= off && b_off < off + e.length) {
+            return e.offset + (b_off - off);
+        }
+        off += e.length;
+    }
+    return 0;
+}
+
+int BlueStore::read(CollectionRef c, const ghobject_t &oid, uint64_t offset,
+                    uint64_t length, bufferlist &bl) {
+    if (!c) return -ENOENT;
+
+    auto o = c->get_onode(oid, false);
+    if (!o || !o->exists) return -ENOENT;
+
+    if (offset >= o->onode.size) return 0;
+
+    if (length == 0 || offset + length > o->onode.size) {
+        length = o->onode.size - offset;
+    }
+
+    return _do_read(o, offset, length, bl);
+}
+
+int BlueStore::_do_read(OnodeRef o, uint64_t offset, uint64_t length,
+                        bufferlist &bl) {
+    bl.clear();
+
+    uint64_t end = offset + length;
+
+    uint64_t pos = offset;
+    auto it = o->extent_map.seek_lextent(offset);
+    if (it == o->extent_map.end()) {
+        it = o->extent_map.begin();
+    }
+
+    while (pos < end) {
+        if (it == o->extent_map.end() || it->logical_offset > pos) {
+            uint64_t hole_end =
+                (it != o->extent_map.end()) ? it->logical_offset : end;
+            uint64_t hole_len = std::min(hole_end - pos, end - pos);
+            bl.append_zero(hole_len);
+            pos += hole_len;
+            continue;
+        }
+
+        uint64_t ext_start = it->logical_offset;
+        uint64_t ext_end = ext_start + it->length;
+
+        if (ext_end <= pos) {
+            ++it;
+            continue;
+        }
+
+        uint64_t read_off = std::max(pos, ext_start);
+        uint64_t read_end = std::min(end, ext_end);
+        uint64_t read_len = read_end - read_off;
+
+        uint64_t blob_off = it->blob_offset + (read_off - ext_start);
+        BlobRef blob = it->blob;
+
+        uint64_t phys_off = _blob_to_phys(blob->get_blob(), blob_off);
+
+        uint64_t aligned_off = phys_off & ~(block_size_ - 1);
+        uint64_t front_pad = phys_off - aligned_off;
+        uint64_t aligned_len = (front_pad + read_len + block_size_ - 1) &
+            ~(block_size_ - 1);
+
+        bufferlist raw_bl;
+        int r = bdev_->read(aligned_off, aligned_len, &raw_bl, nullptr, true);
+        if (r < 0) return r;
+
+        if (blob->get_blob().has_csum() && blob_off >= front_pad) {
+            uint64_t csum_off = blob_off - front_pad;
+            int bad = blob->get_blob().verify_csum(csum_off, raw_bl,
+                                                   block_size_);
+            if (bad >= 0) return -EIO;
+        }
+
+        bufferlist trimmed;
+        trimmed.substr_of(raw_bl, front_pad, read_len);
+        bl.claim_append(trimmed);
+
+        pos = read_end;
+        ++it;
+    }
+
+    return bl.length();
+}
+
 int BlueStore::_do_write(TransContext *txc, Collection *ch, OnodeRef o,
                          uint64_t offset, uint64_t length, bufferlist &bl) {
     if (length == 0) return 0;
@@ -1079,17 +1172,6 @@ void BlueStore::_do_write_big(TransContext *txc, Collection *ch, OnodeRef o,
         offset += l;
         length -= l;
     }
-}
-
-static uint64_t _blob_to_phys(const bluestore_blob_t &blob, uint64_t b_off) {
-    uint64_t off = 0;
-    for (const auto &e : blob.get_extents()) {
-        if (b_off >= off && b_off < off + e.length) {
-            return e.offset + (b_off - off);
-        }
-        off += e.length;
-    }
-    return 0;
 }
 
 int BlueStore::_do_alloc_write(TransContext *txc, OnodeRef o,

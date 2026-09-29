@@ -49,6 +49,9 @@ public:
                            std::vector<BlueStoreTransaction> &tls,
                            std::function<void()> on_commit = nullptr);
 
+    int read(CollectionRef c, const ghobject_t &oid, uint64_t offset,
+             uint64_t length, bufferlist &bl);
+
     void txc_aio_finish(void *p);
 
 private:
@@ -98,6 +101,8 @@ private:
     void _wctx_finish(TransContext *txc, WriteContext *wctx);
     void _choose_write_options(WriteContext *wctx);
     void _pad_zeros(bufferlist *bl, uint64_t *offset, uint64_t chunk_size);
+
+    int _do_read(OnodeRef o, uint64_t offset, uint64_t length, bufferlist &bl);
 
     void _kv_start();
     void _kv_stop();
