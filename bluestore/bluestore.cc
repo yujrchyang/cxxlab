@@ -4,6 +4,7 @@
 #include <bit>
 #include <cerrno>
 #include <chrono>
+#include <random>
 #include <sstream>
 
 #include "blk/allocator.h"
@@ -727,7 +728,9 @@ void BlueStore::_txc_finalize_kv(TransContext *txc, Transaction t) {
 }
 
 void BlueStore::_txc_apply_kv(TransContext *txc) {
-    db_->submit_transaction_sync(txc->t);
+    if (!should_inject(cfg_.inject_kv_err_rate)) {
+        db_->submit_transaction_sync(txc->t);
+    }
     txc->set_state(TransContext::STATE_KV_SUBMITTED);
     {
         std::lock_guard<std::mutex> lg(txc->osr->qlock);
@@ -901,7 +904,9 @@ void BlueStore::_kv_sync_thread_main() {
 
         {
             auto synct = db_->get_transaction();
-            db_->submit_transaction_sync(synct);
+            if (!should_inject(cfg_.inject_kv_err_rate)) {
+                db_->submit_transaction_sync(synct);
+            }
         }
 
         auto finish = std::chrono::steady_clock::now();
@@ -1062,6 +1067,10 @@ int BlueStore::read(CollectionRef c, const ghobject_t &oid, uint64_t offset,
     auto o = c->get_onode(oid, false);
     if (!o || !o->exists) return -ENOENT;
 
+    if (error_injector_ && error_injector_->check_mdata_error(oid)) {
+        return -EIO;
+    }
+
     if (offset >= o->onode.size) return 0;
 
     if (length == 0 || offset + length > o->onode.size) {
@@ -1069,6 +1078,15 @@ int BlueStore::read(CollectionRef c, const ghobject_t &oid, uint64_t offset,
     }
 
     int r = _do_read(o, offset, length, bl);
+
+    if (r >= 0 && error_injector_ &&
+        error_injector_->check_data_error(oid)) {
+        r = -EIO;
+    }
+
+    if (r >= 0 && should_inject(cfg_.inject_read_err_rate)) {
+        r = -EIO;
+    }
 
     auto read_end = std::chrono::steady_clock::now();
     _log_latency(l_bluestore_read_lat,
@@ -1797,6 +1815,9 @@ int BlueStore::_do_alloc_write(TransContext *txc, OnodeRef o,
 
     PExtentVector prealloc;
     if (need > 0) {
+        if (should_inject(cfg_.inject_write_err_rate)) {
+            return -ENOSPC;
+        }
         int64_t r = alloc_->allocate(need, min_alloc_size_, 0, 0, &prealloc);
         if (r < 0) {
             return -ENOSPC;
@@ -1951,7 +1972,9 @@ void BlueStore::_deferred_submit() {
 
                 bufferlist write_bl;
                 write_bl.substr_of(op.data, data_pos, write_len);
-                bdev_->aio_write(e.offset, write_bl, &txc->ioc, false);
+                if (!should_inject(cfg_.inject_write_err_rate)) {
+                    bdev_->aio_write(e.offset, write_bl, &txc->ioc, false);
+                }
                 data_pos += write_len;
             }
         }
@@ -2458,6 +2481,13 @@ void BlueStore::_log_state_latency(TransContext *txc, int idx) {
 void BlueStore::_log_latency(int idx, uint64_t nanos) {
     if (!perf_) return;
     perf_->tinc(idx, nanos);
+}
+
+bool BlueStore::should_inject(double rate) const {
+    if (rate <= 0) return false;
+    static thread_local std::mt19937 rng(std::random_device{}());
+    std::uniform_int_distribution<int> dist(0, 999999);
+    return dist(rng) < static_cast<int>(rate * 1000000);
 }
 
 void BlueStore::_refresh_perf_counters() {

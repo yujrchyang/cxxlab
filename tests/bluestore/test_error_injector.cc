@@ -251,3 +251,130 @@ TEST_F(ErrorInjectorTest, InjectLeakedOnEmptyStore) {
 
     ASSERT_EQ(store.umount(), 0);
 }
+
+// ============================================================================
+// Read path injection hooks
+// ============================================================================
+
+TEST_F(ErrorInjectorTest, InjectDataErrorCausesReadEio) {
+    BlueStore store;
+    auto cfg = make_config();
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 0);
+    ghobject_t oid(1, 0, "", "read_eio", "", 0, 0);
+    write_object(store, coll, oid, "hello");
+
+    auto *inj = store.get_error_injector();
+    ASSERT_NE(inj, nullptr);
+    inj->inject_data_error(oid);
+
+    bufferlist read_bl;
+    EXPECT_EQ(store.read(coll, oid, 0, 5, read_bl), -EIO);
+
+    inj->clear();
+    EXPECT_EQ(store.read(coll, oid, 0, 5, read_bl), 5);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(ErrorInjectorTest, InjectMdataErrorCausesReadEio) {
+    BlueStore store;
+    auto cfg = make_config();
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 0);
+    ghobject_t oid(1, 0, "", "mdata_eio", "", 0, 0);
+    write_object(store, coll, oid, "data");
+
+    auto *inj = store.get_error_injector();
+    ASSERT_NE(inj, nullptr);
+    inj->inject_mdata_error(oid);
+
+    bufferlist read_bl;
+    EXPECT_EQ(store.read(coll, oid, 0, 4, read_bl), -EIO);
+
+    inj->clear();
+    EXPECT_EQ(store.read(coll, oid, 0, 4, read_bl), 4);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(ErrorInjectorTest, InjectReadErrRateCausesEio) {
+    BlueStore store;
+    auto cfg = make_config();
+    cfg.inject_read_err_rate = 1.0;
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 0);
+    ghobject_t oid(1, 0, "", "rate_eio", "", 0, 0);
+    write_object(store, coll, oid, std::string(4096, 'Z'));
+
+    bufferlist read_bl;
+    EXPECT_EQ(store.read(coll, oid, 0, 4096, read_bl), -EIO);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+// ============================================================================
+// Write path injection hooks
+// ============================================================================
+
+TEST_F(ErrorInjectorTest, InjectWriteErrRatePreventsDataPersist) {
+    BlueStore store;
+    auto cfg = make_config();
+    cfg.inject_write_err_rate = 1.0;
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 0);
+    ghobject_t oid(1, 0, "", "enospc", "", 0, 0);
+    write_object(store, coll, oid, std::string(4096, 'W'));
+
+    auto cfg2 = make_config();
+    ASSERT_EQ(store.umount(), 0);
+
+    BlueStore store2;
+    ASSERT_EQ(store2.mount(cfg2), 0);
+    auto coll2 = store2.create_collection(1, 0);
+    bufferlist read_bl;
+    int r = store2.read(coll2, oid, 0, 4096, read_bl);
+    EXPECT_EQ(r, 0);
+
+    ASSERT_EQ(store2.umount(), 0);
+}
+
+// ============================================================================
+// KV path injection hooks
+// ============================================================================
+
+TEST_F(ErrorInjectorTest, InjectKvErrRateSkipsCommit) {
+    BlueStore store;
+    auto cfg = make_config();
+    cfg.inject_kv_err_rate = 1.0;
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 0);
+    ghobject_t oid(1, 0, "", "kv_skip", "", 0, 0);
+    write_object(store, coll, oid, "persisted");
+
+    bufferlist read_bl;
+    EXPECT_EQ(store.read(coll, oid, 0, 9, read_bl), 9);
+
+    auto cfg2 = make_config();
+    cfg2.inject_kv_err_rate = 0;
+    ASSERT_EQ(store.umount(), 0);
+
+    BlueStore store2;
+    ASSERT_EQ(store2.mount(cfg2), 0);
+    auto coll2 = store2.create_collection(1, 0);
+    bufferlist read_bl2;
+    int r = store2.read(coll2, oid, 0, 9, read_bl2);
+    EXPECT_EQ(r, -ENOENT);
+
+    ASSERT_EQ(store2.umount(), 0);
+}

@@ -234,6 +234,8 @@ private:
     void _log_latency(int idx, uint64_t nanos);
     void _refresh_perf_counters();
 
+    bool should_inject(double rate) const;
+
     struct BSPerfTracker {
         PerfCounters::avg_tracker<uint64_t> commit_latency_ns;
         void update_from_perfcounters(PerfCounters &perf);
