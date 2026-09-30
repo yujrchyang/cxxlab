@@ -159,6 +159,9 @@ int BlueStore::mount(const BlueStoreConfig &cfg) {
     _init_logger();
     _refresh_perf_counters();
 
+    error_injector_ = std::make_unique<ErrorInjector>();
+    error_injector_->bind(alloc_, fm_, db_.get(), min_alloc_size_);
+
     mounted_ = true;
     return 0;
 
@@ -195,6 +198,7 @@ int BlueStore::umount() {
 
     buffer_cache_.reset();
     perf_.reset();
+    error_injector_.reset();
 
     _close_alloc();
     _close_fm();
@@ -2051,16 +2055,29 @@ int BlueStore::_fsck(FSCKDepth depth, bool repair) {
     int64_t errors = 0;
     int64_t repaired = 0;
 
-    // Open DB and bdev for fsck
+    bool live_mode = mounted_ && db_ && bdev_ && fm_;
+
+    if (live_mode) {
+        errors += _fsck_check_collections();
+
+        std::set<uint64_t> used_blocks;
+        errors += _fsck_check_objects(depth, used_blocks);
+
+        if (depth != FSCK_SHALLOW) {
+            errors += _fsck_check_freelist(used_blocks, repair);
+            if (repair) repaired = errors;
+        }
+
+        return repair ? (errors - repaired) : errors;
+    }
+
+    // Standalone mode: open separate DB and bdev for fsck
     std::unique_ptr<KeyValueDB> fsck_db;
     std::unique_ptr<BlockDevice> fsck_bdev;
-    BlockDevice *original_bdev = bdev_.get();
     FreelistManager *original_fm = fm_;
     FreelistManager *fsck_fm = nullptr;
 
-    // Always open DB and bdev for fsck
     if (!repair) {
-        // Open in read-only mode
         fsck_db = KeyValueDB::create("rocksdb", cfg_.db_path);
         if (!fsck_db) return -EIO;
 
@@ -2071,10 +2088,11 @@ int BlueStore::_fsck(FSCKDepth depth, bool repair) {
         r = fsck_db->open_read_only(oss);
         if (r < 0) return r;
     } else {
-        // Open in read-write mode for repair
         fsck_db = KeyValueDB::create("rocksdb", cfg_.db_path);
         if (!fsck_db) return -EIO;
 
+        fsck_db->set_merge_operator(std::string(PREFIX_ALLOC_BITMAP),
+                                    std::make_shared<XorMergeOperator>());
         int r = fsck_db->init();
         if (r < 0) return r;
 
@@ -2083,30 +2101,23 @@ int BlueStore::_fsck(FSCKDepth depth, bool repair) {
         if (r < 0) return r;
     }
 
-    // Open bdev
     fsck_bdev = BlockDevice::create(cfg_.bdev_path, _aio_callback, this);
     if (!fsck_bdev) {
-        db_.swap(fsck_db);
         return -EIO;
     }
     int r = fsck_bdev->open(cfg_.bdev_path);
     if (r < 0) {
-        db_.swap(fsck_db);
         return r;
     }
 
-    // Initialize fm
     fsck_fm = FreelistManager::create(
         cfg_.freelist_type.empty() ? "bitmap" : cfg_.freelist_type,
         PREFIX_SUPER, PREFIX_ALLOC_BITMAP);
     if (!fsck_fm) {
         fsck_bdev->close();
-        db_.swap(fsck_db);
-        bdev_.swap(fsck_bdev);
         return -EIO;
     }
 
-    // Initialize fm from DB
     auto cfg_reader = [&fsck_db](const std::string &key, std::string *value) -> int {
         bufferlist bl;
         int r = fsck_db->get(PREFIX_SUPER, key, &bl);
@@ -2119,32 +2130,25 @@ int BlueStore::_fsck(FSCKDepth depth, bool repair) {
     if (r < 0) {
         delete fsck_fm;
         fsck_bdev->close();
-        db_.swap(fsck_db);
-        bdev_.swap(fsck_bdev);
         return r;
     }
 
-    // Temporarily swap db_, bdev_, and fm_ to use fsck versions
     db_.swap(fsck_db);
     bdev_.swap(fsck_bdev);
     fm_ = fsck_fm;
 
-    // Check collections
     errors += _fsck_check_collections();
 
-    // Check objects and track used blocks
     std::set<uint64_t> used_blocks;
     errors += _fsck_check_objects(depth, used_blocks);
 
-    // Check freelist (REGULAR and DEEP only)
     if (depth != FSCK_SHALLOW && bdev_ && fm_) {
         errors += _fsck_check_freelist(used_blocks, repair);
         if (repair) {
-            repaired = errors;  // Assume all errors are repaired
+            repaired = errors;
         }
     }
 
-    // Restore original db_, bdev_, and fm_
     db_.swap(fsck_db);
     if (bdev_) {
         bdev_->close();
@@ -2291,11 +2295,6 @@ int64_t BlueStore::_fsck_check_freelist(const std::set<uint64_t> &used_blocks,
                                         bool repair) {
     int64_t errors = 0;
 
-    // If no blocks are used, skip freelist check (empty store)
-    if (used_blocks.empty()) {
-        return 0;
-    }
-
     // Use cfg_.min_alloc_size as fallback if min_alloc_size_ is not set
     uint64_t min_alloc = min_alloc_size_ > 0 ? min_alloc_size_ : cfg_.min_alloc_size;
     if (min_alloc == 0) {
@@ -2319,10 +2318,8 @@ int64_t BlueStore::_fsck_check_freelist(const std::set<uint64_t> &used_blocks,
     // Check for conflicts: blocks that are both used and free
     for (uint64_t block : used_blocks) {
         if (free_blocks.count(block) > 0) {
-            // Block is both used and free - error
             errors++;
             if (repair) {
-                // Mark as used (remove from freelist)
                 Transaction t = db_->get_transaction();
                 fm_->allocate(block * min_alloc, min_alloc, t);
                 db_->submit_transaction_sync(t);
@@ -2330,9 +2327,25 @@ int64_t BlueStore::_fsck_check_freelist(const std::set<uint64_t> &used_blocks,
         }
     }
 
-    // Note: We cannot reliably detect leaked blocks (blocks that are allocated
-    // but not tracked) without additional metadata. We only check for conflicts
-    // (blocks that are both used and free).
+    // Check for leaked blocks: allocated (not in free list) but not used
+    // by any object. Skip if freelist enumeration returned no data (standalone
+    // mode without merge operator can't read bitmap merges).
+    if (free_blocks.empty()) {
+        return errors;
+    }
+
+    uint64_t total_blocks = fm_->get_size() / min_alloc;
+    for (uint64_t block = 0; block < total_blocks; ++block) {
+        if (used_blocks.count(block) == 0 &&
+            free_blocks.count(block) == 0) {
+            errors++;
+            if (repair) {
+                Transaction t = db_->get_transaction();
+                fm_->release(block * min_alloc, min_alloc, t);
+                db_->submit_transaction_sync(t);
+            }
+        }
+    }
 
     return errors;
 }

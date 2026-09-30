@@ -186,3 +186,15 @@ target_link_libraries(test_integration
         GTest::gtest_main
 )
 add_test(NAME test_integration COMMAND test_integration)
+
+add_executable(test_error_injector test_error_injector.cc)
+target_include_directories(test_error_injector PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_error_injector
+    PRIVATE
+        bluestore
+        kv
+        blk
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_error_injector COMMAND test_error_injector)

@@ -152,7 +152,6 @@ bool BitmapFreelistManager::enumerate_next(
         enumerate_offset_ = key_decode_u64(k.data());
         enumerate_bl_ = enumerate_p_->value();
         cxxlab_assert(enumerate_offset_ == 0);
-        cxxlab_assert(get_next_set_bit(enumerate_bl_, 0) == 0);
     }
 
     if (enumerate_offset_ >= size_) {

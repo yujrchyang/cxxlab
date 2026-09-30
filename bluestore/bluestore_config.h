@@ -27,6 +27,10 @@ struct BlueStoreConfig {
     bool create = false;
     bool force = false;
 
+    double inject_read_err_rate = 0;
+    double inject_write_err_rate = 0;
+    double inject_kv_err_rate = 0;
+
     static BlueStoreConfig make_default(const std::string &path);
 };
 

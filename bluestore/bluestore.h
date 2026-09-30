@@ -16,6 +16,7 @@
 #include "bluestore/bluestore_types.h"
 #include "bluestore/buffer_cache.h"
 #include "bluestore/collection.h"
+#include "bluestore/error_injector.h"
 #include "bluestore/trans_context.h"
 #include "common/perf_counter.h"
 #include "kv/key_value_db.h"
@@ -128,6 +129,10 @@ public:
 
     PerfCounters *get_perf_counters() const { return perf_.get(); }
     void dump_perf_counters(Formatter *f);
+
+    ErrorInjector *get_error_injector() const {
+        return error_injector_.get();
+    }
 
 private:
     int _open_bdev(const std::string &path);
@@ -286,6 +291,7 @@ private:
     std::atomic<bool> finisher_stop_{false};
 
     std::unique_ptr<PerfCounters> perf_;
+    std::unique_ptr<ErrorInjector> error_injector_;
 };
 
 }  // namespace TOPNSPC
