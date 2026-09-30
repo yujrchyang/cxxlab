@@ -792,12 +792,12 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
   - `BufferCache::trim()`: 跳过 WRITING buffer (移到 front) 继续淘汰 CLEAN buffer，防止 WRITING 堵住 LRU 尾部导致缓存无限膨胀
   - `BufferCache::flush()`: 同步清理 `BufferSpace::writing_` 列表，防止悬垂指针
 
-## 阶段五：R7 可观测性与运维（P2，16 项）[ ]
+## 阶段五：R7 可观测性与运维（P2，16 项）[✅]
 
 > Ceph 参考：`src/common/perf_counters.h`（PerfCountersBuilder/PerfCounters 框架）、`src/os/bluestore/BlueStore.h:3314`（BSPerfTracker）、`BlueStore.h:3350-3378`（error injection）、`BlueStore.cc:5035`（`_init_logger` 注册约 60 个计数器）。
 > cxxlab 简化基线：无 CephContext / PerfCountersCollection / ceph-mgr / histogram / mempool；avg_tracker 用 `sum+count` 原子做 long-running average；error injection 不含 SharedBlob/misreference/zombie（Deferred ADR-04）。
 
-### 5.1 PerfCounters 基础框架 [ ]
+### 5.1 PerfCounters 基础框架 [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -808,7 +808,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - R7 映射: #15 BSPerfTracker 容器、#1 基础性能计数器
 - 测试: builder add → tick → dump 验证值正确；并发 inc 无竞争
 
-### 5.2 BlueStore PerfCounters 集成 + BSPerfTracker [ ]
+### 5.2 BlueStore PerfCounters 集成 + BSPerfTracker [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -823,7 +823,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - R7 映射: #1、#2、#15、#22（设备统计部分）
 - 测试: 跑 write/read → 验证 `txc_count`/`read_lat`/`write_small` 递增、延迟 > 0
 
-### 5.3 最简 Benchmark 基线 [ ]
+### 5.3 最简 Benchmark 基线 [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -833,7 +833,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 与重构关系: 阶段六拆分 `bluestore.cc` 后用此基线对比验证行为无回归
 - 测试: benchmark 跑通，产出非零数字
 
-### 5.4 Error Injection 框架 [ ]
+### 5.4 Error Injection 框架 [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -845,7 +845,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - R7 映射: #10 框架
 - 测试: 注入 data error → read 返回 -EIO；注入 leaked → fsck 检出；注入 false_free → fsck 检出
 
-### 5.5 Error Injection 注入点（write/read/kv/device）[ ]
+### 5.5 Error Injection 注入点（write/read/kv/device）[✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -860,7 +860,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - R7 映射: #11、#12、#13、#14
 - 测试: 各注入点触发预期错误 + 事务正确回滚（STATE_PREPARE→aborted），不残留半状态
 
-### 5.6 BlueFS Perf Counters [ ]
+### 5.6 BlueFS Perf Counters [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -872,7 +872,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - R7 映射: #16
 - 测试: BlueFS 写读 → 计数器递增；压缩触发 → compact_count 递增
 
-### 5.7 空间/分配器统计 [ ]
+### 5.7 空间/分配器统计 [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -884,7 +884,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - R7 映射: #5、#24（缓存统计）、#26（空间使用统计）
 - 测试: 分配 N 字节 → statfs 反映；cache 命中率随访问模式变化
 
-### 5.8 KV 统计 + PREFIX_STAT [ ]
+### 5.8 KV 统计 + PREFIX_STAT [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -897,7 +897,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - R7 映射: #3、#4
 - 测试: KV ops → 计数器；merge ops → merge 统计
 
-### 5.9 FSCK 进度 + 配置热更新 [ ]
+### 5.9 FSCK 进度 + 配置热更新 [✅]
 
 | 文件 | 内容 |
 | --- | --- |
@@ -943,14 +943,211 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 
 ## 阶段六：重构（R7 落地后）[ ]
 
-| 步骤 | 内容 | 验证手段 |
+> 架构评审见 [docs/design/refactor-architecture-review.md](design/refactor-architecture-review.md)。核心方向: 用模块提取替代文件拆分——每次提取产出一个独立可测的深模块（自有 `.h`/`.cc`/test 文件，构造时不依赖 BlueStore），而非把 BlueStore 的成员函数搬到不同 `.cc` 文件。模块留在 `bluestore/` 目录下编入 `libbluestore.so`，与 `BufferCache`/`ExtentMap`/`Blob` 同级。
+
+### 6.1 提取 DeferredWriter 模块 [ ]
+
+将 deferred write 的数据结构合并、生命周期状态机、提交链路收敛为一个独立可测模块，替代原 T5+T6 分散在 BlueStore 成员中的方案。
+
+cxxlab 现状: `_deferred_queue`（`bluestore.cc:1951`）立即 submit 无合并；`_deferred_submit`（`bluestore.cc:1964`）逐 extent `aio_write` 无 IO 聚合；无 pending/running 分离；`_deferred_aio_finish`（`bluestore.cc:1998`）有 bug（遍历已空的 `deferred_queue_` 删 key）；kv_sync 无 deferred_done→flush→stable 链路。
+
+Ceph 参考: `BlueStore.h:2069-2095`（`DeferredBatch`）、`BlueStore.cc:3879-3899`（`prepare_write`）、`3901-3965`（`_discard`）、`13860-13903`（`_deferred_queue`）、`13941-13999`（`_deferred_submit_unlock`）、`14009-14063`（`_deferred_aio_finish`）、`13905-13939`（`deferred_try_submit`）、`13355-13403`（kv_sync flush）、`13607-13623`（kv_finalize deferred_stable）。
+
+新增文件:
+
+| 文件 | 内容 |
+| --- | --- |
+| `bluestore/deferred_writer.h` | `DeferredWriter` 类（窄接口 4 方法）+ `DeferredBatch`（嵌套或独立） |
+| `bluestore/deferred_writer.cc` | 实现 |
+| `tests/bluestore/test_deferred_writer.cc` | 单元测试（构造 DeferredWriter 直接测，无需 mount） |
+
+`DeferredWriter` 接口（4 方法）:
+
+- `queue(TransContext* txc)`: 获取 OSR 的 deferred_pending（不存在则新建），将 txc 加入 txcs，遍历 deferred ops 调 `prepare_write` 合并到 iomap
+- `try_submit()`: 遍历全局 deferred_queue_osr_，对有 pending 且无 running 的 OSR 调 submit
+- `flush_done()`: AIO 完成回调，清除 deferred_running，batch 加入 deferred_done_queue_
+- `finalize_stable()`: kv_finalize 阶段处理 deferred_stable，对每个 txc 调 `_txc_state_proc`，删 PREFIX_DEFERRED key
+
+`DeferredBatch` 内部结构（DeferredWriter 持有）:
+
+- `iomap`(map<uint64_t, deferred_io>) 按 physical offset 排序
+- `txcs`(list<TransContext*>)
+- `ioc`(IOContext)
+- `seq_bytes`(map<uint64_t, uint64_t>)
+- `prepare_write(seq, offset, length, blp)`: 插入新 IO 前先 `_discard` 移除重叠的旧 IO
+- `_discard(offset, length)`: 精确覆盖语义——新写与已 pending IO 部分重叠时保留非重叠 head/tail，丢弃重叠部分并扣减 seq_bytes
+
+其他改动:
+
+- `OpSequencer`（`trans_context.h`）新增 `deferred_pending`/`deferred_running` 指针 + `deferred_lock`
+- `BlueStoreConfig`（`bluestore_config.h`）新增 `deferred_batch_ops` 字段（默认 16）
+- `_deferred_submit` 内部: 切换 pending→running，遍历 iomap 合并连续 offset 的 IO 为单个 `aio_write`，最后统一 `aio_submit`
+- `_kv_sync_thread_main` 新增 deferred_done→`bdev->flush()`→deferred_stable 链路
+- `_kv_finalize_thread_main` 新增 deferred_stable 处理: 按 `deferred_batch_ops` 阈值触发 `try_submit`
+- 修复原 `_deferred_aio_finish` 的删 key bug（改为 finalize_stable 阶段删）
+- BlueStore 持有 `std::unique_ptr<DeferredWriter> deferred_writer_`，原 `_deferred_*` 5 个方法 + 4 个成员移除，替换为 4 方法调用
+
+测试:
+
+- `test_deferred_writer.cc`: 直接构造 DeferredWriter + mock BlockDevice，测 prepare_write 合并/discard 覆盖语义、连续 IO 聚合、pending/running 分离
+- `test_write.cc` Deferred write 测试组 + 新增多 txc 合并提交测试
+
+风险: 高（多线程状态机 + IO 保序）
+
+### 6.2 提取 ReadPipeline 模块 [ ]
+
+将读路径三阶段流水线 + 数据结构收敛为独立可测模块，替代原 T1 把 4 个 struct + 3 方法加进 BlueStore 成员的方案。
+
+cxxlab 现状: `_do_read`（`bluestore.cc:1109-1200`）单函数单循环，cache 查询/同步读盘/csum 校验/组装全内联，逐 chunk 同步 `bdev_->read`，无 IO 合并、无 csum 重试。
+
+Ceph 参考: `BlueStore.cc:11156-11281`（`_do_read` 主控）、`10893-10992`（`_read_cache`）、`10994-11061`（`_prepare_read_ioc`）、`11063-11154`（`_generate_read_result_bl`）。
+
+新增文件:
+
+| 文件 | 内容 |
+| --- | --- |
+| `bluestore/read_pipeline.h` | `ReadPipeline` 类 + 内部数据结构（不暴露到 `bluestore.h`） |
+| `bluestore/read_pipeline.cc` | 实现 |
+| `tests/bluestore/test_read_pipeline.cc` | 单元测试（mock BlockDevice + BufferCache，无需 mount） |
+
+`ReadPipeline` 接口（1 方法）:
+
+- `read(OnodeRef o, uint64_t offset, uint64_t length, BlockDevice* bdev, BufferCache* cache) → bufferlist`
+
+内部数据结构（`read_pipeline.h` 内，不进 `bluestore.h`）:
+
+- `region_t` = `{uint64_t logical_offset; uint32_t blob_xoffset; uint32_t length; uint32_t front}`
+- `read_req_t` = `{uint32_t r_off; uint32_t r_len; bufferlist bl; std::vector<region_t> regs}`
+- `regions2read_t` = `std::vector<read_req_t>`
+- `blobs2read_t` = `std::map<BlobRef, regions2read_t>`
+- `ready_regions_t` = `std::map<uint64_t, bufferlist>`
+
+三阶段实现（ReadPipeline private 方法）:
+
+- `_read_cache(OnodeRef, offset, length, ready_regions, blobs2read)`: 遍历 extent_map，查 BufferCache，命中进 ready_regions，未命中对齐 chunk_size 后合并进 blobs2read
+- `_prepare_read_ioc(blobs2read, ioc)`: 遍历 blobs2read，按 `blob.map()` 映射物理偏移，注册 `aio_read` 到同一 IOContext
+- `_generate_read_result_bl(OnodeRef, offset, length, ready_regions, blobs2read, buffered, csum_error, bl)`: csum 校验、cache 回填、组装结果 + hole 填零
+
+`read()` 主控: 调三阶段 + `aio_submit` + `aio_wait` + csum error 重试（`retry_count` 递增）
+
+其他改动:
+
+- `bdev_->read`（同步）改为 `bdev_->aio_read` + 统一 `aio_submit`（需确认 `BlockDevice` 的 aio_read 接口）
+- BlueStore 的 `read()` 委托给 `read_pipeline_->read(...)`，`_do_read` 从 `bluestore.cc` 移除
+
+前置条件: 确认 `BlockDevice::aio_read` 可用（`blk/` 已有 libaio 支持）
+
+测试:
+
+- `test_read_pipeline.cc`: 直接构造 ReadPipeline + mock BlockDevice，测 cache hit/miss 混合、多 chunk 批量读、csum 重试、hole 填零
+- `test_read.cc`（已有 9 测试）保留作为集成验证
+
+### 6.3 迁移 TransContext 状态机 [ ]
+
+将 11 态状态机从 BlueStore 的 `_txc_state_proc` 迁入 TransContext 自身，使其 own 自己的生命周期。
+
+cxxlab 现状: `TransContext`（`trans_context.h:25-115`）持有 15 个 public 字段 + `state_`（private），但 11 态转换全由 BlueStore 的 `_txc_state_proc`（`bluestore.cc:492-558`）驱动，共 17 个 `txc->set_state()` 调用点分散在 `_txc_state_proc`/`_txc_finish_io`/`_txc_committed_kv`/`_kv_sync` 中。TransContext 不封装自己的转换。
+
+改动文件: `trans_context.h`（TransContext）、`bluestore.cc`（移除 `_txc_state_proc`，17 个 set_state 点收敛）
+
+改动内容:
+
+1. 在 TransContext 新增 `advance(BlueStoreEnv& env)` 方法:
+   - 内部持有 11 态转换表（state × condition → next_state + side_effect）
+   - `BlueStoreEnv` 是一个窄 visitor/callback 接口，提供 BlueStore 的环境能力（`aio_submit`、`kv_sync_queue`、`finisher_queue`、`deferred_writer_queue` 等）
+   - 每次调用 advance 根据当前 state + 条件决定转换 + 触发副作用
+
+2. BlueStore 的 `_txc_state_proc` 改为薄壳: 构造 `BlueStoreEnv` 并调 `txc->advance(env)`
+
+3. 17 个外部 `set_state` 点坍缩为 `advance()` 调用（副作用内聚到 TransContext）
+
+4. TransContext 的 15 个 public 字段逐步 private 化（只暴露 advance 接口 + 必要的查询方法）
+
+测试:
+
+- `test_trans_context.cc`（已有 12 测试）补充: 直接构造 TransContext + mock BlueStoreEnv，测 11 态转换表的每个路径、非法状态拒绝、副作用触发顺序
+
+风险: 高（17 调用点、11 状态、副作用）。建议在 6.1/6.2 之后做——前两次提取已缩小 BlueStore surface，迁移更安全。
+
+### 6.4 blob reuse 交错搜索 + can_reuse_blob 对齐修复 [ ]（独立）
+
+cxxlab 现状: `_do_write_big`（`bluestore.cc:1746-1783`）和 `_do_write_small`（`bluestore.cc:1638-1691`）用 forward 先穷尽、未命中再 backward 的两段式搜索。`can_reuse_blob`（`blob.cc:86`）多了 min_alloc_size 对齐。
+
+Ceph 参考: `BlueStore.cc:15524-15568`（big 双向 do-while）、`14910-15211`（small 双向 do-while）、`2307-2379`（`can_reuse_blob`）。
+
+改动内容:
+
+1. `_do_write_big` 和 `_do_write_small` 的 forward+backward 搜索改为 `do-while` 交错模式: 每轮先查最近的 forward extent 再查最近的 backward extent，任一命中即退出，保证找到物理距离最近的复用 blob
+
+2. 移除 `can_reuse_blob`（`blob.cc:86`）中多余的 `new_blen = (new_blen + min_alloc_size - 1) & ~(min_alloc_size - 1)` 对齐，与 Ceph 保持一致
+
+验证: `tests/bluestore/test_write.cc`（已有 22 测试）补充"前后都有可复用 blob 时选最近"的场景
+
+### 6.5 small write RMW + BigDeferredWriteContext [ ]（依赖 6.4）
+
+cxxlab 现状: `_do_write_small` 仅 `can_reuse_blob` 单一复用路径，无 direct-write-unused、无 chunk 对齐 RMW。`_do_write_big` 无 `BigDeferredWriteContext`，大写中的小覆写无法延迟。
+
+Ceph 参考: `BlueStore.cc:14963-14997`（direct-write-unused）、`15023-15091`（chunk RMW）、`BlueStore.h:2268-2288`（`BigDeferredWriteContext`）、`BlueStore.cc:15262-15316`（`can_defer`/`apply_defer`）、`15318-15379`（`_do_write_big_apply_deferred`）、`15418-15504`（big defer 路径）。
+
+改动内容:
+
+1. `_do_write_small` 补 direct-write-unused 路径: 写落在已分配+unused 的 chunk 对齐区域时直接 `aio_write` 或 deferred（若 `b_len < prefer_deferred_size`）。需确认 `bluestore_blob_t::is_unused()`/`is_allocated()`/`is_unallocated()` 在 `bluestore_types.h` 中是否已实现
+
+2. `_do_write_small` 补 chunk 对齐 RMW 路径: 写落在已分配空间但不对齐 chunk 边界时，先读 head/tail 填充 chunk，再构造 `bluestore_deferred_op_t` 延迟覆写
+
+3. 新增 `BigDeferredWriteContext` 结构体（`trans_context.h`）: 持有 `off`/`b_off`/`used`/`head_read`/`tail_read`/`blob_ref`/`blob_start`/`res_extents`，实现 `can_defer()`/`apply_defer()`
+
+4. 新增 `_do_write_big_apply_deferred` 函数: 执行 RMW（读回 head/tail → 拼接 → `calc_csum` → `set_lextent` → 构造 deferred op）
+
+5. `_do_write_big` 中补 `prefer_deferred_size` RMW 路径: 当 `l <= prefer_deferred_size*2` 时尝试 `can_defer`
+
+验证: `tests/bluestore/test_write.cc` 补充小覆写 RMW + 大写小覆写延迟场景
+
+风险: 高（RMW 逻辑复杂，涉及读回 + csum + deferred op 构造）
+
+### 6.6 property/fuzz 测试 [ ]
+
+| 测试目标 | 内容 | Ceph 参考 |
 | --- | --- | --- |
-| 6.1 | 拆分 `bluestore.cc`（约 2200 行）按 read/write/admin/fsck/lifecycle 分文件，插桩调用点随之搬迁但 `PerfCounters`/`ErrorInjector` 抽象层不动 | 5.3 基线对比 + 全量回归 |
-| 6.2 | 回填高风险简化项: blob reuse 双向搜索、deferred 批处理、read 三阶段流水线（`_read_cache`/`_prepare_read_ioc`/`_generate_read_result_bl`） | 5.5 注入点 + 5.3 基线 |
-| 6.3 | compress_extent_map / punch_hole / checksum 偏移补 property/fuzz 测试 | 新增 fuzz 测试 |
+| compress_extent_map | 随机生成 extent 序列，验证 compress 后物理连续性（相邻 extent 的 blob 物理偏移连续才可合并） | `BlueStore.cc` ExtentMap::compress_extent_map |
+| punch_hole | 随机 offset+length punch hole，验证结果 extent 列表无重叠、无空洞残留 | `BlueStore.cc` ExtentMap::punch_hole |
+| checksum 偏移 | 随机 blob offset 读，验证 csum 校验的 chunk 对齐与偏移映射正确 | `BlueStore.cc` `_verify_csum` |
+
+测试框架: GoogleTest property-based（或简单 fuzz：随机种子 + N 轮随机操作序列），新增 `tests/bluestore/test_fuzz.cc`。
+
+### T7 SharedBlob 间接层 — 跳过
+
+一个 adapter = 假想 seam，无第二用例（clone/snapshot 不存在），高爆破半径（每个 `bc()` 调用点都要改）。跳过直到 clone/snapshot 到来，届时第二用例（跨 cloned onode 共享 blob cache）才能证明 seam 合理。
+
+### 依赖与优先级
+
+```plaintext
+6.1 (DeferredWriter)  ─────── independent
+6.2 (ReadPipeline)    ─────── independent
+6.4 (blob reuse)      ─────── independent
+6.3 (TransContext)    ─────── 6.1, 6.2
+6.5 (write RMW)       ─────── 6.4
+6.6 (fuzz)            ─────── 6.4, 6.5
+```
+
+建议顺序: 6.1 > 6.2 > 6.4 > 6.3 > 6.5 > 6.6。6.1/6.2/6.4 独立且收益明确，先做；6.3 在 6.1/6.2 缩小 surface 后更安全；6.5 依赖 6.4 的 blob reuse 改进；6.6 最后补 fuzz 验证。
+
+验证手段: 5.5 注入点（write/read/kv/device error injection 验证回滚正确）+ 5.3 benchmark 基线对比（写放大 / 读延迟 / IO 合并数改善）。
+
+### 与原方案的关键变化
+
+| 方面 | 原方案 | 融合后 |
+| --- | --- | --- |
+| 6.1 | 拆 8 文件（pass-through） | 提取 DeferredWriter 模块 |
+| read pipeline | BlueStore 成员 + 4 struct 进 bluestore.h | 提取 ReadPipeline 模块（struct 内部化） |
+| deferred | DeferredBatch 作 helper + 5 方法留 BlueStore | 提取 DeferredWriter owning 生命周期 |
+| TransContext | 未涉及 | 新增 6.3 迁移状态机 |
+| blob reuse + write RMW | T2/T3/T4 分散 | 合并为 6.4 + 6.5（原样保留） |
+| T7 SharedBlob | 可选实施 | 跳过 |
+| 文件拆分 | 需要单独做 | 随模块提取后自然消解 |
 
 ---
 
 ## 下一步
 
-阶段一至四全部完成（BlueFS + BlueRocksEnv + Throttle + BlueStore MVP/P1 + BTier）。当前推进阶段五 R7 可观测性与运维（P2），完成后进入阶段六重构。起点: 5.1 PerfCounters 基础框架。
+阶段一至五全部完成（BlueFS + BlueRocksEnv + Throttle + BlueStore MVP/P1 + BTier + R7 可观测性与运维）。当前进入阶段六重构。起点: 6.1 提取 DeferredWriter 模块。
