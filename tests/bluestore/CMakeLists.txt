@@ -159,3 +159,15 @@ target_link_libraries(test_fsck
         GTest::gtest_main
 )
 add_test(NAME test_fsck COMMAND test_fsck)
+
+add_executable(test_buffer_cache test_buffer_cache.cc)
+target_include_directories(test_buffer_cache PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_buffer_cache
+    PRIVATE
+        bluestore
+        kv
+        blk
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_buffer_cache COMMAND test_buffer_cache)

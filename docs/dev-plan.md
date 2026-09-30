@@ -383,14 +383,24 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - 实现状态: 已完成 7 个测试用例，覆盖基础 FSCK、深度检查、快速修复、泄漏 extent 修复、extent 重叠检测、空 store、多 collection 场景
 - 简化实现: 未实现 BlueStoreRepairer 和 StoreSpaceTracker，直接使用 FreelistManager 进行 extent 检查和修复
 
-### 3.18 Buffer Cache [P1]
+### 3.18 Buffer Cache [✅]
 
 | 文件 | 内容 |
 | --- | --- |
-| `BlueStore.h/cc` | `BufferCache`、`OnodeCache`、LRU 淘汰策略、`_read_cache()`、`_write_cache()` |
+| `buffer_cache.h/cc` | `Buffer`、`BufferSpace`、`BufferCache` (全局 LRU) |
+| `blob.h/cc` | `BufferSpace bc_` + `Collection*` 反向指针 |
+| `bluestore.h/cc` | `_buffer_cache_write()`、`_finish_write()`、读/写/zero/remove 路径集成 |
+| `bluestore_config.h` | `buffer_cache_size` (默认 64MiB)、`onode_cache_size` (默认 1024) |
 
 - 依赖: 3.11 (Read) + 3.9/3.10 (Write)
-- 测试: 读取命中缓存 → 写入更新缓存 → LRU 淘汰验证 → 并发访问正确性
+- 测试: 11 个单元测试 + 8 个集成测试 = 19 个测试
+- 实现状态: 已完成 chunk 级缓存，BufferSpace 挂在每个 Blob 上，全局 BufferCache 提供 LRU 淘汰
+- 读路径: `_do_read()` 先查 `blob->bc().read()` → 命中直接返回 → 未命中走磁盘 + `did_read()` 填充缓存
+- 写路径: `_do_alloc_write()` 调用 `_buffer_cache_write()` 创建 WRITING buffer → `_txc_committed_kv()` 或 `_deferred_aio_finish()` 调用 `_finish_write()` 提升为 CLEAN
+- zero 路径: `_do_zero()` 对旧 extent 的 blob 调用 `bc().discard()` 失效缓存
+- remove 路径: `_do_remove()` 对所有涉及 blob 调用 `bc().clear()` 清空缓存
+- NOCACHE 标记: `finish_write()` 中 NOCACHE buffer 直接丢弃，不提升为 CLEAN
+- WRITING 状态可读: 支持读后写一致性 (read-after-write)
 
 ### 3.19 完整集成测试 [MVP]
 
@@ -684,6 +694,16 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - `_do_read` 使用单次遍历模式：遍历 extent map 时同步读取数据并追加到 `bl`，空洞用 `append_zero` 内联填充，保证空洞与数据的正确交错顺序（修复了分两阶段处理导致的排序 bug）
 - `verify_csum` 从 blob-relative offset (`req.blob_offset - front_pad`) 计算校验偏移，而非从 physical offset 计算（避免非连续 extent 场景下的偏移错误）
 - Read 路径使用 buffered IO (`bdev->read(..., buffered=true)`)，跳过对齐检查，由内核页缓存处理未对齐请求
+- Buffer Cache 架构 (Phase 3.18): `BufferSpace` 挂在每个 `Blob` 上 (per-Blob 缓存空间)，`BufferCache` 全局单例提供 LRU 淘汰
+- Buffer Cache 粒度: chunk 级对齐 (按 `get_chunk_size()` 对齐)，与 Ceph 一致
+- Buffer Cache 默认大小: 64 MiB (`buffer_cache_size`)，可通过配置调整
+- OnodeSpace `max_size` 可配置: 通过 `onode_cache_size` 配置项传入 Collection 构造函数
+- Buffer 状态: WRITING (写中) / CLEAN (已提交)，WRITING 状态对读可见 (read-after-write 一致性)
+- Buffer NOCACHE 标记: `finish_write()` 中 NOCACHE buffer 直接丢弃，不提升为 CLEAN
+- Buffer Cache 锁: BufferSpace 方法内部按需获取 cache lock (条件锁，cache=nullptr 时不锁)，避免调用方重复加锁
+- `_finish_write()` 调用点: `_txc_committed_kv()` (直接写) + `_deferred_aio_finish()` (延迟写)
+- Buffer Cache 淘汰: `trim()` 仅淘汰 CLEAN buffer (WRITING 跳过)，在 `add()` / `did_read()` / `finish_write()` 后自动触发
+- 简化实现: 单 shard (无分片)，仅 LRU (无 2Q)，无 autotune，无 mempool 内存分类
 - BlueStore Read Path (Phase 3.11): 9 tests
   - `bluestore_types.h/cc`: `verify_csum()` — mirrors `calc_csum()`, iterates chunks computing CRC32C and comparing against stored values
   - `bluestore.h/cc`: `read()` public API, `_do_read()` core read logic
@@ -730,8 +750,23 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
   - `repair()` fixes leaked extents (marks them as free)
   - `quick_fix()` quick check and fix for common issues
   - Simplified: directly uses FreelistManager for extent checking and repair, no BlueStoreRepairer or StoreSpaceTracker
+- BlueStore Buffer Cache (Phase 3.18): 19 tests
+  - `buffer_cache.h/cc`: `Buffer` (CLEAN/WRITING 状态 + FLAG_NOCACHE), `BufferSpace` (per-Blob 缓存空间), `BufferCache` (全局 LRU + 统计)
+  - `blob.h/cc`: `BufferSpace bc_` 成员 + `Collection *coll_` 反向指针 + `get_cache()`
+  - `bluestore.h/cc`: `_buffer_cache_write()` / `_finish_write()` 辅助方法
+  - `_do_read()`: chunk 级缓存查询，未命中走磁盘 + `did_read()` 填充
+  - `_do_alloc_write()`: 每次写入调用 `_buffer_cache_write()` 创建 WRITING buffer
+  - `_txc_committed_kv()` / `_deferred_aio_finish()`: 调用 `_finish_write()` 将 WRITING 提升为 CLEAN
+  - `_do_zero()`: 对旧 extent 的 blob 调用 `bc().discard()` 失效缓存
+  - `_do_remove()`: 对所有涉及 blob 调用 `bc().clear()` 清空缓存
+  - `bluestore_config.h`: `buffer_cache_size` (默认 64MiB) + `onode_cache_size` (默认 1024)
+  - `collection.h/cc`: `OnodeSpace` max_size 可配置 + `BufferCache*` 指针 + `set_cache()` / `get_cache()`
+  - `trans_context.h`: `std::set<Blob*> blobs_written` 跟踪写入的 blob
+  - WRITING 状态对读可见 (支持 read-after-write 一致性)
+  - NOCACHE 标记的 buffer 在 `finish_write()` 中直接丢弃
+  - LRU 淘汰: `trim()` 在 `add()` / `did_read()` / `finish_write()` 后自动触发
+  - 简化实现: 单 shard (无分片)，仅 LRU (无 2Q)，无 autotune，无 mempool
 
 ## 下一步
 
-1. Phase 3.18: Buffer Cache (`BufferCache`, `OnodeCache`, LRU 淘汰策略, `_read_cache()`, `_write_cache()`)
-2. Phase 3.19: 完整集成测试 (全路径场景: mkfs → mount → 多次写入 → 读取 → zero → remove → collection list → umount → mount → 验证持久化)
+1. Phase 3.19: 完整集成测试 (全路径场景: mkfs → mount → 多次写入 → 读取 → zero → remove → collection list → umount → mount → 验证持久化)

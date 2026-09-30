@@ -1,5 +1,6 @@
 add_library(bluestore SHARED
     blob.cc
+    buffer_cache.cc
     bluestore.cc
     bluestore_types.cc
     collection.cc

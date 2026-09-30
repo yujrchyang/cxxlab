@@ -21,6 +21,9 @@ struct BlueStoreConfig {
     std::string freelist_type = "bitmap";
     std::string allocator_type = "bitmap";
 
+    uint64_t buffer_cache_size = 64 * 1024 * 1024;  // 64 MiB
+    size_t onode_cache_size = 1024;
+
     bool create = false;
     bool force = false;
 

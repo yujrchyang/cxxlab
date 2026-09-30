@@ -20,6 +20,7 @@ namespace TOPNSPC {
 
 class Collection;
 class OpSequencer;
+class Blob;
 
 struct TransContext {
     enum state_t : uint8_t {
@@ -83,6 +84,8 @@ struct TransContext {
 
     IOContext ioc;
     bool had_ios = false;
+
+    std::set<Blob *> blobs_written;
 
     std::chrono::steady_clock::time_point start;
 

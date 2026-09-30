@@ -2,7 +2,13 @@
 
 #include <algorithm>
 
+#include "bluestore/collection.h"
+
 namespace TOPNSPC {
+
+BufferCache *Blob::get_cache() const {
+    return coll_ ? coll_->get_cache() : nullptr;
+}
 
 void Blob::get_ref(uint32_t offset, uint32_t length, uint32_t min_alloc_size) {
     if (blob_.get_logical_length() == 0) {

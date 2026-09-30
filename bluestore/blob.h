@@ -3,9 +3,13 @@
 #include <atomic>
 #include <cstdint>
 
+#include "bluestore/buffer_cache.h"
 #include "bluestore_types.h"
 
 namespace TOPNSPC {
+
+class Collection;
+class BufferCache;
 
 class Blob {
 public:
@@ -61,11 +65,21 @@ public:
     bool can_reuse_blob(uint32_t min_alloc_size, uint32_t target_blob_size,
                         uint32_t b_offset, uint32_t *length0);
 
+    BufferSpace &bc() { return bc_; }
+    const BufferSpace &bc() const { return bc_; }
+
+    Collection *get_collection() const { return coll_; }
+    void set_collection(Collection *c) { coll_ = c; }
+
+    BufferCache *get_cache() const;
+
 private:
     std::atomic_int nref_{0};
     int16_t id_{-1};
     bluestore_blob_t blob_;
     bluestore_blob_use_tracker_t used_in_blob_;
+    BufferSpace bc_;
+    Collection *coll_ = nullptr;
 };
 
 using BlobRef = Blob *;

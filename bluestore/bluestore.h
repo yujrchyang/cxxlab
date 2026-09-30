@@ -14,6 +14,7 @@
 #include "bluestore/bluestore_config.h"
 #include "bluestore/bluestore_constants.h"
 #include "bluestore/bluestore_types.h"
+#include "bluestore/buffer_cache.h"
 #include "bluestore/collection.h"
 #include "bluestore/trans_context.h"
 #include "kv/key_value_db.h"
@@ -169,6 +170,10 @@ private:
     void _deferred_aio_finish(TransContext *txc);
     int _deferred_replay();
 
+    void _buffer_cache_write(TransContext *txc, BlobRef b, uint64_t offset,
+                             bufferlist &bl, unsigned flags);
+    void _finish_write(TransContext *txc);
+
     void _kv_start();
     void _kv_stop();
     void _kv_sync_thread_main();
@@ -181,6 +186,8 @@ private:
 
     BlueStoreConfig cfg_;
     bool mounted_ = false;
+
+    std::unique_ptr<BufferCache> buffer_cache_;
 
     std::unique_ptr<BlockDevice> bdev_;
     std::unique_ptr<KeyValueDB> db_;

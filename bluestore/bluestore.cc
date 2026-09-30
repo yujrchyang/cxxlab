@@ -142,6 +142,8 @@ int BlueStore::mount(const BlueStoreConfig &cfg) {
     if (r < 0)
         goto out_close_fm;
 
+    buffer_cache_ = std::make_unique<BufferCache>(cfg_.buffer_cache_size);
+
     r = _open_collections();
     if (r < 0)
         goto out_close_alloc;
@@ -178,10 +180,16 @@ int BlueStore::umount() {
     _kv_stop();
     _finisher_stop();
 
+    if (buffer_cache_) {
+        buffer_cache_->flush();
+    }
+
     {
         std::lock_guard<std::mutex> lg(coll_lock_);
         coll_map_.clear();
     }
+
+    buffer_cache_.reset();
 
     _close_alloc();
     _close_fm();
@@ -322,9 +330,11 @@ int BlueStore::_open_collections() {
         auto p = bl.cbegin();
         cxxlab::decode(cnode, p);
 
-        auto coll = std::make_shared<Collection>(db_.get(), coll_id);
+        auto coll = std::make_shared<Collection>(db_.get(), coll_id,
+                                                 cfg_.onode_cache_size);
         coll->get_cnode() = cnode;
         coll->set_store(this);
+        coll->set_cache(buffer_cache_.get());
 
         {
             std::lock_guard<std::mutex> lg(coll_lock_);
@@ -405,9 +415,11 @@ CollectionRef BlueStore::get_collection(uint64_t coll_id) {
 }
 
 CollectionRef BlueStore::create_collection(uint64_t coll_id, uint32_t bits) {
-    auto coll = std::make_shared<Collection>(db_.get(), coll_id);
+    auto coll = std::make_shared<Collection>(db_.get(), coll_id,
+                                             cfg_.onode_cache_size);
     coll->get_cnode() = bluestore_cnode_t(bits);
     coll->set_store(this);
+    coll->set_cache(buffer_cache_.get());
 
     std::string key;
     key_encode_u64(coll_id, &key);
@@ -712,6 +724,9 @@ void BlueStore::_txc_committed_kv(TransContext *txc) {
         std::lock_guard<std::mutex> lg(txc->osr->qlock);
         txc->set_state(TransContext::STATE_KV_DONE);
     }
+
+    _finish_write(txc);
+
     for (auto &fn : txc->on_commits) {
         _queue_finisher(std::move(fn));
     }
@@ -991,6 +1006,7 @@ int BlueStore::_do_read(OnodeRef o, uint64_t offset, uint64_t length,
     bl.clear();
 
     uint64_t end = offset + length;
+    BufferCache *cache = buffer_cache_.get();
 
     uint64_t pos = offset;
     auto it = o->extent_map.seek_lextent(offset);
@@ -1034,20 +1050,41 @@ int BlueStore::_do_read(OnodeRef o, uint64_t offset, uint64_t length,
             aligned_len = blob_len - blob_chunk_start;
         }
 
-        uint64_t phys_off = _blob_to_phys(blob->get_blob(), blob_chunk_start);
+        bufferlist chunk_bl;
+        bool cache_hit = false;
 
-        bufferlist raw_bl;
-        int r = bdev_->read(phys_off, aligned_len, &raw_bl, nullptr, true);
-        if (r < 0) return r;
+        if (cache) {
+            cache_hit = blob->bc().read(cache,
+                                        static_cast<uint32_t>(blob_chunk_start),
+                                        static_cast<uint32_t>(aligned_len),
+                                        &chunk_bl);
+        }
 
-        if (blob->get_blob().has_csum()) {
-            int bad = blob->get_blob().verify_csum(blob_chunk_start, raw_bl,
-                                                   block_size_);
-            if (bad >= 0) return -EIO;
+        if (!cache_hit) {
+            uint64_t phys_off =
+                _blob_to_phys(blob->get_blob(), blob_chunk_start);
+
+            bufferlist raw_bl;
+            int r = bdev_->read(phys_off, aligned_len, &raw_bl, nullptr, true);
+            if (r < 0) return r;
+
+            if (blob->get_blob().has_csum()) {
+                int bad = blob->get_blob().verify_csum(blob_chunk_start,
+                                                       raw_bl, block_size_);
+                if (bad >= 0) return -EIO;
+            }
+
+            if (cache) {
+                blob->bc().did_read(cache,
+                                    static_cast<uint32_t>(blob_chunk_start),
+                                    raw_bl);
+            }
+
+            chunk_bl = std::move(raw_bl);
         }
 
         bufferlist trimmed;
-        trimmed.substr_of(raw_bl, front_pad, read_len);
+        trimmed.substr_of(chunk_bl, front_pad, read_len);
         bl.claim_append(trimmed);
 
         pos = read_end;
@@ -1061,6 +1098,15 @@ int BlueStore::_do_zero(TransContext *txc, Collection *ch, OnodeRef o,
                         uint64_t offset, uint64_t length) {
     WriteContext wctx;
     o->extent_map.punch_hole(offset, length, &wctx.old_extents);
+
+    BufferCache *cache = buffer_cache_.get();
+    if (cache) {
+        for (auto &oe : wctx.old_extents) {
+            uint32_t cache_off = oe.e.blob_offset;
+            oe.e.blob->bc().discard(cache, cache_off, oe.e.length);
+        }
+    }
+
     _wctx_finish(txc, &wctx);
 
     uint64_t end = offset + length;
@@ -1075,6 +1121,17 @@ int BlueStore::_do_zero(TransContext *txc, Collection *ch, OnodeRef o,
 int BlueStore::_do_remove(TransContext *txc, Collection *ch, OnodeRef o) {
     WriteContext wctx;
     o->extent_map.punch_hole(0, o->onode.size, &wctx.old_extents);
+
+    BufferCache *cache = buffer_cache_.get();
+    if (cache) {
+        std::set<BlobRef> seen;
+        for (auto &oe : wctx.old_extents) {
+            if (seen.insert(oe.e.blob).second) {
+                oe.e.blob->bc().clear(cache);
+            }
+        }
+    }
+
     _wctx_finish(txc, &wctx);
 
     o->exists = false;
@@ -1538,6 +1595,7 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
 
     BlobRef b = new Blob();
     b->get();
+    b->set_collection(ch);
 
     wctx->write(offset, b, alloc_len, b_off0, padded_bl, b_off, length, true);
 }
@@ -1618,6 +1676,7 @@ void BlueStore::_do_write_big(TransContext *txc, Collection *ch, OnodeRef o,
         if (new_blob) {
             b = new Blob();
             b->get();
+            b->set_collection(ch);
             b_off = 0;
         }
 
@@ -1702,6 +1761,8 @@ int BlueStore::_do_alloc_write(TransContext *txc, OnodeRef o,
 
         o->extent_map.set_lextent(wi.logical_offset, wi.b_off0, wi.length0, b,
                                   nullptr);
+
+        _buffer_cache_write(txc, b, wi.b_off0, wi.bl, 0);
 
         if (wi.bl.length() > 0) {
             uint64_t phys_off = _blob_to_phys(dblob, wi.b_off);
@@ -1790,9 +1851,7 @@ void BlueStore::_deferred_submit() {
 }
 
 void BlueStore::_deferred_aio_finish(TransContext *txc) {
-    // Decrement pending IO counter
     if (--deferred_pending_ios_ == 0) {
-        // All deferred IOs complete, clean up WAL records
         std::lock_guard<std::mutex> l(deferred_lock_);
 
         auto it = db_->get_transaction();
@@ -1804,7 +1863,8 @@ void BlueStore::_deferred_aio_finish(TransContext *txc) {
         db_->submit_transaction_sync(it);
     }
 
-    // Transition to CLEANUP state
+    _finish_write(txc);
+
     txc->set_state(TransContext::STATE_DEFERRED_CLEANUP);
     _txc_state_proc(txc);
 }
@@ -1837,6 +1897,28 @@ int BlueStore::_deferred_replay() {
     }
 
     return count;
+}
+
+// Buffer cache integration
+
+void BlueStore::_buffer_cache_write(TransContext *txc, BlobRef b,
+                                    uint64_t offset, bufferlist &bl,
+                                    unsigned flags) {
+    BufferCache *cache = buffer_cache_.get();
+    if (!cache || !bl.length()) return;
+
+    b->bc().write(cache, txc->seq, static_cast<uint32_t>(offset), bl, flags);
+    txc->blobs_written.insert(b);
+}
+
+void BlueStore::_finish_write(TransContext *txc) {
+    BufferCache *cache = buffer_cache_.get();
+    if (!cache) return;
+
+    for (auto *b : txc->blobs_written) {
+        b->bc().finish_write(cache, txc->seq);
+    }
+    txc->blobs_written.clear();
 }
 
 // FSCK implementation

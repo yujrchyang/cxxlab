@@ -6,8 +6,9 @@
 
 namespace TOPNSPC {
 
-Collection::Collection(KeyValueDB *db, uint64_t coll_id)
-    : db_(db), coll_id_(coll_id), onode_space_(1000), osr_(new OpSequencer()) {}
+Collection::Collection(KeyValueDB *db, uint64_t coll_id,
+                       size_t onode_cache_size)
+    : db_(db), coll_id_(coll_id), onode_space_(onode_cache_size), osr_(new OpSequencer()) {}
 
 Collection::~Collection() {
     delete osr_;

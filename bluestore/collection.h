@@ -15,6 +15,7 @@ namespace TOPNSPC {
 class KeyValueDB;
 class OpSequencer;
 class BlueStore;
+class BufferCache;
 
 class OnodeSpace {
 public:
@@ -26,6 +27,7 @@ public:
     void clear();
     size_t size() const { return cache_.size(); }
     bool empty() const { return cache_.empty(); }
+    void set_max_size(size_t max_size) { max_size_ = max_size; }
 
 private:
     void evict_if_needed();
@@ -39,7 +41,8 @@ private:
 
 class Collection {
 public:
-    Collection(KeyValueDB *db, uint64_t coll_id);
+    Collection(KeyValueDB *db, uint64_t coll_id,
+               size_t onode_cache_size = 1000);
 
     ~Collection();
 
@@ -62,6 +65,9 @@ public:
     BlueStore *get_store() const { return store_; }
     void set_store(BlueStore *s) { store_ = s; }
 
+    BufferCache *get_cache() const { return cache_; }
+    void set_cache(BufferCache *c) { cache_ = c; }
+
     std::mutex &get_lock() { return lock_; }
 
 private:
@@ -74,6 +80,7 @@ private:
     std::mutex lock_;
     OpSequencer *osr_;
     BlueStore *store_ = nullptr;
+    BufferCache *cache_ = nullptr;
 };
 
 using CollectionRef = std::shared_ptr<Collection>;
