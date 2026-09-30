@@ -138,6 +138,33 @@ int ExtentMap::compress_extent_map(uint64_t offset, uint64_t length) {
         if (it->logical_end() == next->logical_offset &&
             it->blob == next->blob &&
             it->blob_offset + it->length == next->blob_offset) {
+            // Check physical contiguity: end of current extent's data
+            // must be adjacent to start of next extent's data on disk
+            uint32_t curr_end_blob_off = it->blob_offset + it->length;
+            uint32_t next_start_blob_off = next->blob_offset;
+
+            auto &extents = it->blob->get_blob().get_extents();
+            uint64_t curr_phys_end = 0;
+            uint64_t next_phys_start = 0;
+            uint32_t blob_off = 0;
+
+            for (const auto &e : extents) {
+                if (blob_off <= curr_end_blob_off &&
+                    curr_end_blob_off < blob_off + e.length) {
+                    curr_phys_end = e.offset + (curr_end_blob_off - blob_off);
+                }
+                if (blob_off <= next_start_blob_off &&
+                    next_start_blob_off < blob_off + e.length) {
+                    next_phys_start = e.offset + (next_start_blob_off - blob_off);
+                }
+                blob_off += e.length;
+            }
+
+            if (curr_phys_end != next_phys_start) {
+                ++it;
+                continue;
+            }
+
             uint32_t new_len = it->length + next->length;
             uint32_t lo = it->logical_offset;
             uint32_t bo = it->blob_offset;

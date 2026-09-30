@@ -402,14 +402,22 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 - NOCACHE 标记: `finish_write()` 中 NOCACHE buffer 直接丢弃，不提升为 CLEAN
 - WRITING 状态可读: 支持读后写一致性 (read-after-write)
 
-### 3.19 完整集成测试 [MVP]
+### 3.19 完整集成测试 [✅]
 
 | 文件 | 内容 |
 | --- | --- |
-| `test_bluestore.cc` | 全路径场景：mkfs → mount → 多次写入 → 读取 → zero → remove → collection list → umount → mount → 验证持久化 |
+| `test_fixture.h/cc` | 共享 Fixture 基类 `BlueStoreTestFixture` |
+| `test_integration.cc` | 23 个集成测试覆盖全路径场景 |
 
 - 依赖: 所有
-- 测试: 压力测试、崩溃恢复、边界条件
+- 测试: 23 个测试 — 全路径 (1) + 持久化 (7) + 混合操作 (3) + 压力 (4) + 边界 (4) + 崩溃恢复 (1) + FSCK (2) + 延迟写 (1)
+- 实现状态: 已完成
+- 共享 Fixture: `BlueStoreTestFixture` 提供 SetUp/TearDown (mkdtemp + block device 创建)、`make_config()`、`submit_and_wait()`、`close_and_reopen()`、`write_object()`、`read_and_verify()`、`make_oid()`
+- `close_and_reopen()`: umount → 销毁 store → 新建 store → mount (同一路径)，验证持久化
+- 混合操作: `MixedWorkloadState` 维护内存影子状态 (shadow)，随机执行 write/read/remove/setattr，与 store 实际数据对比验证
+- 全路径测试 `FullPathSequence`: mkfs → mount → 创建 10 对象 → 写入 → 读回 → zero 前 3 个 → remove 第 4-6 个 → collection_list 验证 7 个 → umount → mount → 再次全量验证
+- 崩溃恢复 `DeferredReplayAfterCrash`: 写入小数据触发延迟写路径 → umount → mount → 验证数据持久化
+- 发现并修复 3 个生产代码 bug (详见已完成实现记录)
 
 ---
 
@@ -766,7 +774,28 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
   - NOCACHE 标记的 buffer 在 `finish_write()` 中直接丢弃
   - LRU 淘汰: `trim()` 在 `add()` / `did_read()` / `finish_write()` 后自动触发
   - 简化实现: 单 shard (无分片)，仅 LRU (无 2Q)，无 autotune，无 mempool
+- BlueStore 集成测试 (Phase 3.19): 23 tests
+  - `test_fixture.h/cc`: 共享 `BlueStoreTestFixture` 基类 (SetUp/TearDown/close_and_reopen/submit_and_wait/write_object/read_and_verify)
+  - `test_integration.cc`: 23 个测试覆盖全路径/持久化/混合操作/压力/边界/崩溃恢复/FSCK
+  - `MixedWorkloadState`: 内存影子状态 + 随机 write/read/remove/setattr 混合操作 + 对比验证
+  - 全路径 `FullPathSequence`: mkfs → mount → 10 对象写入 → 读回 → zero → remove → list → umount → mount → 全量验证
+  - 持久化: 7 个 remount 测试 (write/overwrite/zero/remove/attrs/omap/collection_list)
+  - 压力: ManySmallWrites (50x64KB) + ManyObjectsWriteRead (200 对象) + LargeObjectChunked (4MB) + CacheEvictionUnderPressure
+  - 边界: EmptyObjectReadWrite + ZeroLengthWrite + ReadBeyondSize + OverlappingWriteSameTransaction
+  - 崩溃恢复: DeferredReplayAfterCrash (延迟写路径持久化验证)
+  - FSCK: FsckAfterMixedOps (deep) + FsckAfterRemount
+  - 发现并修复 3 个生产代码 bug:
+    - `_do_alloc_write`: blob reuse 时 `need` 计算使用 `wi.blob_length` (未扩展) 而非 `logical_length` (已扩展)，导致新分配的 extent 为 0
+    - `_do_alloc_write`: blob reuse 时 `new_alloc_len` 未按 `min_alloc_size` 对齐，导致 BitmapAllocator 断言失败
+    - `can_reuse_blob`: `add_tail` 扩展量未按 `min_alloc_size` 对齐，导致 blob logical_length 非对齐
+  - `compress_extent_map`: 添加物理连续性检查，防止合并非连续物理 extent (否则 `_do_read` 单次读取会跨越不连续的物理区域)
+  - `BufferCache::trim()`: 跳过 WRITING buffer (移到 front) 继续淘汰 CLEAN buffer，防止 WRITING 堵住 LRU 尾部导致缓存无限膨胀
+  - `BufferCache::flush()`: 同步清理 `BufferSpace::writing_` 列表，防止悬垂指针
 
 ## 下一步
 
-1. Phase 3.19: 完整集成测试 (全路径场景: mkfs → mount → 多次写入 → 读取 → zero → remove → collection list → umount → mount → 验证持久化)
+阶段三 BlueStore 核心引擎 MVP + P1 已全部完成。后续可选方向:
+
+1. Phase 3.18 补充: Buffer Cache 分片 (多 shard) + 2Q 淘汰策略
+2. 性能基准测试 + 调优
+3. 上层 OSD 接口对接

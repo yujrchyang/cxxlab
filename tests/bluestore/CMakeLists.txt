@@ -171,3 +171,18 @@ target_link_libraries(test_buffer_cache
         GTest::gtest_main
 )
 add_test(NAME test_buffer_cache COMMAND test_buffer_cache)
+
+add_executable(test_integration test_integration.cc test_fixture.cc)
+target_include_directories(test_integration PRIVATE
+    ${PROJECT_SOURCE_DIR}
+    ${CMAKE_CURRENT_SOURCE_DIR}
+)
+target_link_libraries(test_integration
+    PRIVATE
+        bluestore
+        kv
+        blk
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_integration COMMAND test_integration)

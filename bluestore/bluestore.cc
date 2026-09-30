@@ -1698,7 +1698,9 @@ int BlueStore::_do_alloc_write(TransContext *txc, OnodeRef o,
         for (const auto &e : wi.b->get_blob().get_extents()) {
             if (e.is_valid()) valid_ondisk += e.length;
         }
-        need += wi.blob_length - valid_ondisk;
+        uint32_t target_len = wi.new_blob ? wi.blob_length
+                                          : wi.b->get_blob().get_logical_length();
+        need += target_len - valid_ondisk;
     }
 
     PExtentVector prealloc;
@@ -1719,7 +1721,13 @@ int BlueStore::_do_alloc_write(TransContext *txc, OnodeRef o,
         for (const auto &e : dblob.get_extents()) {
             if (e.is_valid()) valid_ondisk += e.length;
         }
-        uint64_t new_alloc_len = wi.blob_length - valid_ondisk;
+        uint64_t new_alloc_len;
+        if (wi.new_blob) {
+            new_alloc_len = wi.blob_length - valid_ondisk;
+        } else {
+            new_alloc_len = dblob.get_logical_length() - valid_ondisk;
+            new_alloc_len = (new_alloc_len + min_alloc_size_ - 1) & ~(min_alloc_size_ - 1);
+        }
 
         PExtentVector new_extents;
         uint64_t remaining = new_alloc_len;
@@ -1750,6 +1758,22 @@ int BlueStore::_do_alloc_write(TransContext *txc, OnodeRef o,
             }
             for (auto &ne : new_extents) {
                 exts.push_back(ne);
+            }
+
+            if (dblob.has_csum()) {
+                uint32_t csum_chunk = dblob.get_csum_chunk_size();
+                uint32_t needed = dblob.get_logical_length() / csum_chunk;
+                uint32_t have = dblob.csum_data.length() /
+                    dblob.get_csum_value_size();
+                if (needed > have) {
+                    buffer::ptr new_csum =
+                        buffer::create(dblob.get_csum_value_size() * needed);
+                    if (have > 0) {
+                        std::memcpy(new_csum.c_str(), dblob.csum_data.c_str(),
+                                    have * dblob.get_csum_value_size());
+                    }
+                    dblob.csum_data = std::move(new_csum);
+                }
             }
         }
 

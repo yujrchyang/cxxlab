@@ -129,6 +129,8 @@ decode(e, bl.cbegin());   // denc(o, p) 顶层包装
 - `tests/bluestore/test_omap.cc`: OMap tests (7 tests)
 - `tests/bluestore/test_fsck.cc`: FSCK tests (7 tests)
 - `tests/bluestore/test_buffer_cache.cc`: Buffer Cache tests (19 tests: 11 unit + 8 integration)
+- `tests/bluestore/test_fixture.h` / `tests/bluestore/test_fixture.cc`: Shared `BlueStoreTestFixture` base class
+- `tests/bluestore/test_integration.cc`: Full integration tests (23 tests: full-path + persistence + mixed-ops + stress + boundary + crash-recovery + fsck)
 - `tests/blk/test_avl_allocator.cc`: 18 AvlAllocator tests
 - `tests/blk/test_bitmap_allocator.cc`: 23 BitmapAllocator tests
 - `tests/blk/test_hybrid_allocator.cc`: 17 HybridAllocator tests

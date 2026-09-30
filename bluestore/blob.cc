@@ -83,6 +83,8 @@ bool Blob::can_reuse_blob(uint32_t min_alloc_size, uint32_t target_blob_size,
     }
 
     if (new_blen > blen) {
+        new_blen = (new_blen + min_alloc_size - 1) & ~(min_alloc_size - 1);
+
         int64_t overflow = int64_t(new_blen) - target_blob_size;
         if (overflow >= length) {
             return false;
