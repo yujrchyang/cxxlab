@@ -17,6 +17,7 @@
 #include "bluestore/buffer_cache.h"
 #include "bluestore/collection.h"
 #include "bluestore/trans_context.h"
+#include "common/perf_counter.h"
 #include "kv/key_value_db.h"
 
 namespace TOPNSPC {
@@ -25,6 +26,42 @@ class KeyValueDB;
 class BlockDevice;
 class FreelistManager;
 class Allocator;
+
+enum {
+    l_bluestore_first = 1,
+    l_bluestore_allocated,
+    l_bluestore_stored,
+    l_bluestore_fragmentation,
+    l_bluestore_alloc_unit,
+    l_bluestore_state_prepare_lat,
+    l_bluestore_state_aio_wait_lat,
+    l_bluestore_state_io_done_lat,
+    l_bluestore_state_kv_queued_lat,
+    l_bluestore_state_kv_committing_lat,
+    l_bluestore_state_kv_done_lat,
+    l_bluestore_state_deferred_queued_lat,
+    l_bluestore_state_deferred_cleanup_lat,
+    l_bluestore_state_finishing_lat,
+    l_bluestore_submit_lat,
+    l_bluestore_commit_lat,
+    l_bluestore_txc,
+    l_bluestore_read_lat,
+    l_bluestore_read_eio,
+    l_bluestore_kv_flush_lat,
+    l_bluestore_kv_commit_lat,
+    l_bluestore_kv_sync_lat,
+    l_bluestore_kv_final_lat,
+    l_bluestore_write_big,
+    l_bluestore_write_big_bytes,
+    l_bluestore_write_small,
+    l_bluestore_write_small_bytes,
+    l_bluestore_write_new,
+    l_bluestore_write_pad_bytes,
+    l_bluestore_onodes,
+    l_bluestore_buffers,
+    l_bluestore_buffer_bytes,
+    l_bluestore_last,
+};
 
 class BlueStore {
 public:
@@ -88,6 +125,9 @@ public:
     void set_config(const BlueStoreConfig &cfg) { cfg_ = cfg; }
 
     void txc_aio_finish(void *p);
+
+    PerfCounters *get_perf_counters() const { return perf_.get(); }
+    void dump_perf_counters(Formatter *f);
 
 private:
     int _open_bdev(const std::string &path);
@@ -184,6 +224,17 @@ private:
     void _finisher_thread_main();
     void _queue_finisher(std::function<void()> fn);
 
+    void _init_logger();
+    void _log_state_latency(TransContext *txc, int idx);
+    void _log_latency(int idx, uint64_t nanos);
+    void _refresh_perf_counters();
+
+    struct BSPerfTracker {
+        PerfCounters::avg_tracker<uint64_t> commit_latency_ns;
+        void update_from_perfcounters(PerfCounters &perf);
+        uint64_t get_commit_latency_avg() const;
+    } perf_tracker_;
+
     BlueStoreConfig cfg_;
     bool mounted_ = false;
 
@@ -233,6 +284,8 @@ private:
     std::condition_variable finisher_cond_;
     std::deque<std::function<void()>> finisher_queue_;
     std::atomic<bool> finisher_stop_{false};
+
+    std::unique_ptr<PerfCounters> perf_;
 };
 
 }  // namespace TOPNSPC

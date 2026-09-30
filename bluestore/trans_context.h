@@ -88,9 +88,14 @@ struct TransContext {
     std::set<Blob *> blobs_written;
 
     std::chrono::steady_clock::time_point start;
+    std::chrono::steady_clock::time_point last_stamp;
 
     TransContext(Collection *c, OpSequencer *o)
-        : ch(c), osr(o), ioc(this), start(std::chrono::steady_clock::now()) {}
+        : ch(c),
+          osr(o),
+          ioc(this),
+          start(std::chrono::steady_clock::now()),
+          last_stamp(start) {}
 
     ~TransContext() {
         delete deferred_txn;

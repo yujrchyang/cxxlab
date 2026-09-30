@@ -3,6 +3,7 @@
 #include <algorithm>
 #include <bit>
 #include <cerrno>
+#include <chrono>
 #include <sstream>
 
 #include "blk/allocator.h"
@@ -155,6 +156,9 @@ int BlueStore::mount(const BlueStoreConfig &cfg) {
     _finisher_start();
     _kv_start();
 
+    _init_logger();
+    _refresh_perf_counters();
+
     mounted_ = true;
     return 0;
 
@@ -190,6 +194,7 @@ int BlueStore::umount() {
     }
 
     buffer_cache_.reset();
+    perf_.reset();
 
     _close_alloc();
     _close_fm();
@@ -483,6 +488,7 @@ void BlueStore::_txc_state_proc(TransContext *txc) {
     while (true) {
         switch (txc->get_state()) {
         case TransContext::STATE_PREPARE:
+            _log_state_latency(txc, l_bluestore_state_prepare_lat);
             if (txc->ioc.has_pending_aios()) {
                 txc->set_state(TransContext::STATE_AIO_WAIT);
                 txc->had_ios = true;
@@ -492,10 +498,12 @@ void BlueStore::_txc_state_proc(TransContext *txc) {
             [[fallthrough]];
 
         case TransContext::STATE_AIO_WAIT:
+            _log_state_latency(txc, l_bluestore_state_aio_wait_lat);
             _txc_finish_io(txc);
             return;
 
         case TransContext::STATE_IO_DONE: {
+            _log_state_latency(txc, l_bluestore_state_io_done_lat);
             if (txc->had_ios) {
                 txc->osr->txc_with_unstable_io.fetch_add(1);
             }
@@ -517,8 +525,10 @@ void BlueStore::_txc_state_proc(TransContext *txc) {
             [[fallthrough]];
 
         case TransContext::STATE_KV_DONE:
+            _log_state_latency(txc, l_bluestore_state_kv_done_lat);
             if (txc->deferred_txn) {
                 txc->set_state(TransContext::STATE_DEFERRED_QUEUED);
+                _log_state_latency(txc, l_bluestore_state_deferred_queued_lat);
                 _deferred_queue(txc);
                 return;
             }
@@ -526,10 +536,12 @@ void BlueStore::_txc_state_proc(TransContext *txc) {
             [[fallthrough]];
 
         case TransContext::STATE_DEFERRED_CLEANUP:
+            _log_state_latency(txc, l_bluestore_state_deferred_cleanup_lat);
             txc->set_state(TransContext::STATE_FINISHING);
             [[fallthrough]];
 
         case TransContext::STATE_FINISHING:
+            _log_state_latency(txc, l_bluestore_state_finishing_lat);
             _txc_finish(txc);
             return;
 
@@ -731,6 +743,14 @@ void BlueStore::_txc_committed_kv(TransContext *txc) {
         _queue_finisher(std::move(fn));
     }
     txc->on_commits.clear();
+
+    _log_state_latency(txc, l_bluestore_state_kv_committing_lat);
+    auto now = std::chrono::steady_clock::now();
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(now -
+                                                                   txc->start)
+                  .count();
+    _log_latency(l_bluestore_commit_lat, static_cast<uint64_t>(ns));
+    if (perf_) perf_->inc(l_bluestore_txc);
 }
 
 void BlueStore::_txc_finish(TransContext *txc) {
@@ -806,7 +826,15 @@ int BlueStore::queue_transactions(CollectionRef ch,
         txc->on_commits.push_back(std::move(on_commit));
     }
 
+    auto submit_start = std::chrono::steady_clock::now();
     _txc_state_proc(txc);
+    if (perf_) {
+        auto now = std::chrono::steady_clock::now();
+        auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                      now - submit_start)
+                      .count();
+        perf_->tinc(l_bluestore_submit_lat, static_cast<uint64_t>(ns));
+    }
     return 0;
 }
 
@@ -852,8 +880,11 @@ void BlueStore::_kv_sync_thread_main() {
 
         lk.unlock();
 
+        auto start = std::chrono::steady_clock::now();
+
         for (auto *txc : submitting) {
             if (txc->get_state() == TransContext::STATE_KV_QUEUED) {
+                _log_state_latency(txc, l_bluestore_state_kv_queued_lat);
                 _txc_apply_kv(txc);
             }
         }
@@ -862,10 +893,29 @@ void BlueStore::_kv_sync_thread_main() {
             bdev_->flush();
         }
 
+        auto after_flush = std::chrono::steady_clock::now();
+
         {
             auto synct = db_->get_transaction();
             db_->submit_transaction_sync(synct);
         }
+
+        auto finish = std::chrono::steady_clock::now();
+        _log_latency(l_bluestore_kv_flush_lat,
+                     static_cast<uint64_t>(
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             after_flush - start)
+                             .count()));
+        _log_latency(l_bluestore_kv_commit_lat,
+                     static_cast<uint64_t>(
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             finish - after_flush)
+                             .count()));
+        _log_latency(l_bluestore_kv_sync_lat,
+                     static_cast<uint64_t>(
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             finish - start)
+                             .count()));
 
         {
             std::lock_guard<std::mutex> flk(kv_finalize_lock_);
@@ -897,9 +947,20 @@ void BlueStore::_kv_finalize_thread_main() {
 
         lk.unlock();
 
+        auto start = std::chrono::steady_clock::now();
+
         for (auto *txc : committed) {
             _txc_state_proc(txc);
         }
+
+        _refresh_perf_counters();
+
+        auto finish = std::chrono::steady_clock::now();
+        _log_latency(l_bluestore_kv_final_lat,
+                     static_cast<uint64_t>(
+                         std::chrono::duration_cast<std::chrono::nanoseconds>(
+                             finish - start)
+                             .count()));
 
         lk.lock();
     }
@@ -972,6 +1033,9 @@ void BlueStore::_pad_zeros(bufferlist *bl, uint64_t *offset,
         tail_pad = chunk_size - tail_pad;
         bl->append_zero(tail_pad);
     }
+    if (perf_ && (front_pad || tail_pad)) {
+        perf_->inc(l_bluestore_write_pad_bytes, front_pad + tail_pad);
+    }
 }
 
 static uint64_t _blob_to_phys(const bluestore_blob_t &blob, uint64_t b_off) {
@@ -987,6 +1051,8 @@ static uint64_t _blob_to_phys(const bluestore_blob_t &blob, uint64_t b_off) {
 
 int BlueStore::read(CollectionRef c, const ghobject_t &oid, uint64_t offset,
                     uint64_t length, bufferlist &bl) {
+    auto read_start = std::chrono::steady_clock::now();
+
     if (!c) return -ENOENT;
 
     auto o = c->get_onode(oid, false);
@@ -998,7 +1064,18 @@ int BlueStore::read(CollectionRef c, const ghobject_t &oid, uint64_t offset,
         length = o->onode.size - offset;
     }
 
-    return _do_read(o, offset, length, bl);
+    int r = _do_read(o, offset, length, bl);
+
+    auto read_end = std::chrono::steady_clock::now();
+    _log_latency(l_bluestore_read_lat,
+                 static_cast<uint64_t>(
+                     std::chrono::duration_cast<std::chrono::nanoseconds>(
+                         read_end - read_start)
+                         .count()));
+    if (r == -EIO && perf_) {
+        perf_->inc(l_bluestore_read_eio);
+    }
+    return r;
 }
 
 int BlueStore::_do_read(OnodeRef o, uint64_t offset, uint64_t length,
@@ -1598,6 +1675,11 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
     b->set_collection(ch);
 
     wctx->write(offset, b, alloc_len, b_off0, padded_bl, b_off, length, true);
+    if (perf_) {
+        perf_->inc(l_bluestore_write_small);
+        perf_->inc(l_bluestore_write_small_bytes, length);
+        perf_->inc(l_bluestore_write_new);
+    }
 }
 
 void BlueStore::_do_write_big(TransContext *txc, Collection *ch, OnodeRef o,
@@ -1681,6 +1763,12 @@ void BlueStore::_do_write_big(TransContext *txc, Collection *ch, OnodeRef o,
         }
 
         wctx->write(offset, b, l, b_off, chunk_bl, b_off, l, new_blob);
+
+        if (perf_) {
+            perf_->inc(l_bluestore_write_big);
+            perf_->inc(l_bluestore_write_big_bytes, l);
+            if (new_blob) perf_->inc(l_bluestore_write_new);
+        }
 
         bl_pos += l;
         offset += l;
@@ -2247,6 +2335,154 @@ int64_t BlueStore::_fsck_check_freelist(const std::set<uint64_t> &used_blocks,
     // (blocks that are both used and free).
 
     return errors;
+}
+
+void BlueStore::_init_logger() {
+    PerfCountersBuilder b("bluestore", l_bluestore_first, l_bluestore_last);
+
+    b.add_u64(l_bluestore_allocated, "allocated", "Sum for allocated bytes",
+              "al_b", PerfCountersBuilder::PRIO_CRITICAL, UNIT_BYTES);
+    b.add_u64(l_bluestore_stored, "stored", "Sum for stored bytes", "st_b",
+              PerfCountersBuilder::PRIO_CRITICAL, UNIT_BYTES);
+    b.add_u64(l_bluestore_fragmentation, "fragmentation_micros",
+              "How fragmented bluestore free space is");
+    b.add_u64(l_bluestore_alloc_unit, "alloc_unit",
+              "allocation unit size in bytes", "au_b",
+              PerfCountersBuilder::PRIO_CRITICAL, UNIT_BYTES);
+
+    b.add_time_avg(l_bluestore_state_prepare_lat, "state_prepare_lat",
+                   "Average prepare state latency", "sprl",
+                   PerfCountersBuilder::PRIO_USEFUL);
+    b.add_time_avg(l_bluestore_state_aio_wait_lat, "state_aio_wait_lat",
+                   "Average aio_wait state latency", "sawl",
+                   PerfCountersBuilder::PRIO_INTERESTING);
+    b.add_time_avg(l_bluestore_state_io_done_lat, "state_io_done_lat",
+                   "Average io_done state latency", "sidl",
+                   PerfCountersBuilder::PRIO_USEFUL);
+    b.add_time_avg(l_bluestore_state_kv_queued_lat, "state_kv_queued_lat",
+                   "Average kv_queued state latency", "skql",
+                   PerfCountersBuilder::PRIO_USEFUL);
+    b.add_time_avg(l_bluestore_state_kv_committing_lat,
+                   "state_kv_commiting_lat",
+                   "Average kv_commiting state latency", "skcl",
+                   PerfCountersBuilder::PRIO_USEFUL);
+    b.add_time_avg(l_bluestore_state_kv_done_lat, "state_kv_done_lat",
+                   "Average kv_done state latency", "skdl",
+                   PerfCountersBuilder::PRIO_USEFUL);
+    b.add_time_avg(l_bluestore_state_deferred_queued_lat,
+                   "state_deferred_queued_lat",
+                   "Average deferred_queued state latency", "sdql",
+                   PerfCountersBuilder::PRIO_USEFUL);
+    b.add_time_avg(l_bluestore_state_deferred_cleanup_lat,
+                   "state_deferred_cleanup_lat",
+                   "Average cleanup state latency", "sdcl",
+                   PerfCountersBuilder::PRIO_USEFUL);
+    b.add_time_avg(l_bluestore_state_finishing_lat, "state_finishing_lat",
+                   "Average finishing state latency", "sfnl",
+                   PerfCountersBuilder::PRIO_USEFUL);
+
+    b.add_time_avg(l_bluestore_submit_lat, "txc_submit_lat",
+                   "Average submit latency", "s_l",
+                   PerfCountersBuilder::PRIO_CRITICAL);
+    b.add_time_avg(l_bluestore_commit_lat, "txc_commit_lat",
+                   "Average commit latency", "c_l",
+                   PerfCountersBuilder::PRIO_CRITICAL);
+    b.add_u64_counter(l_bluestore_txc, "txc_count", "Transactions committed");
+
+    b.add_time_avg(l_bluestore_read_lat, "read_lat", "Average read latency",
+                   "r_l", PerfCountersBuilder::PRIO_CRITICAL);
+    b.add_u64_counter(l_bluestore_read_eio, "read_eio",
+                      "Read EIO errors propagated to high level callers");
+
+    b.add_time_avg(l_bluestore_kv_flush_lat, "kv_flush_lat",
+                   "Average kv_thread flush latency", "kfsl",
+                   PerfCountersBuilder::PRIO_INTERESTING);
+    b.add_time_avg(l_bluestore_kv_commit_lat, "kv_commit_lat",
+                   "Average kv_thread commit latency", "kcol",
+                   PerfCountersBuilder::PRIO_USEFUL);
+    b.add_time_avg(l_bluestore_kv_sync_lat, "kv_sync_lat",
+                   "Average kv_sync thread latency", "kscl",
+                   PerfCountersBuilder::PRIO_INTERESTING);
+    b.add_time_avg(l_bluestore_kv_final_lat, "kv_final_lat",
+                   "Average kv_finalize thread latency", "kfll",
+                   PerfCountersBuilder::PRIO_INTERESTING);
+
+    b.add_u64_counter(l_bluestore_write_big, "write_big",
+                      "Large aligned writes into fresh blobs");
+    b.add_u64_counter(l_bluestore_write_big_bytes, "write_big_bytes",
+                      "Large aligned writes into fresh blobs (bytes)", nullptr,
+                      PerfCountersBuilder::PRIO_DEBUGONLY, UNIT_BYTES);
+    b.add_u64_counter(l_bluestore_write_small, "write_small",
+                      "Small writes into existing or sparse small blobs");
+    b.add_u64_counter(l_bluestore_write_small_bytes, "write_small_bytes",
+                      "Small writes (bytes)", nullptr,
+                      PerfCountersBuilder::PRIO_DEBUGONLY, UNIT_BYTES);
+    b.add_u64_counter(l_bluestore_write_new, "write_new",
+                      "Write into new blob");
+    b.add_u64_counter(l_bluestore_write_pad_bytes, "write_pad_bytes",
+                      "Sum for write-op padded bytes", nullptr,
+                      PerfCountersBuilder::PRIO_DEBUGONLY, UNIT_BYTES);
+
+    b.add_u64(l_bluestore_onodes, "onodes", "Number of onodes in cache");
+    b.add_u64(l_bluestore_buffers, "buffers", "Number of buffers in cache");
+    b.add_u64(l_bluestore_buffer_bytes, "buffer_bytes",
+              "Number of bytes in buffer cache", nullptr,
+              PerfCountersBuilder::PRIO_USEFUL, UNIT_BYTES);
+
+    perf_ = b.create_perf_counters();
+}
+
+void BlueStore::_log_state_latency(TransContext *txc, int idx) {
+    if (!perf_) return;
+    auto now = std::chrono::steady_clock::now();
+    auto ns = std::chrono::duration_cast<std::chrono::nanoseconds>(
+                  now - txc->last_stamp)
+                  .count();
+    perf_->tinc(idx, static_cast<uint64_t>(ns));
+    txc->last_stamp = now;
+}
+
+void BlueStore::_log_latency(int idx, uint64_t nanos) {
+    if (!perf_) return;
+    perf_->tinc(idx, nanos);
+}
+
+void BlueStore::_refresh_perf_counters() {
+    if (!perf_) return;
+    perf_->set(l_bluestore_alloc_unit, min_alloc_size_);
+
+    uint64_t num_onodes = 0;
+    {
+        std::lock_guard<std::mutex> lg(coll_lock_);
+        for (const auto &p : coll_map_) {
+            num_onodes += p.second->get_onode_count();
+        }
+    }
+    perf_->set(l_bluestore_onodes, num_onodes);
+
+    if (buffer_cache_) {
+        perf_->set(l_bluestore_buffers, buffer_cache_->get_num_buffers());
+        perf_->set(l_bluestore_buffer_bytes, buffer_cache_->get_cur_bytes());
+    }
+
+    if (alloc_) {
+        perf_->set(l_bluestore_fragmentation,
+                   static_cast<uint64_t>(alloc_->get_fragmentation() * 1000));
+    }
+}
+
+void BlueStore::dump_perf_counters(Formatter *f) {
+    if (!perf_) return;
+    perf_tracker_.update_from_perfcounters(*perf_);
+    perf_->dump(f, false);
+}
+
+void BlueStore::BSPerfTracker::update_from_perfcounters(PerfCounters &perf) {
+    commit_latency_ns.consume_next(perf.get_tavg_ns(l_bluestore_commit_lat));
+}
+
+uint64_t BlueStore::BSPerfTracker::get_commit_latency_avg() const {
+    return commit_latency_ns.current_avg();
 }
 
 }  // namespace TOPNSPC

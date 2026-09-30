@@ -68,6 +68,8 @@ public:
     BufferCache *get_cache() const { return cache_; }
     void set_cache(BufferCache *c) { cache_ = c; }
 
+    size_t get_onode_count() const { return onode_space_.size(); }
+
     std::mutex &get_lock() { return lock_; }
 
 private:

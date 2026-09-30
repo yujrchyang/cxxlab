@@ -2,6 +2,7 @@
 
 #include <cstdlib>
 #include <cstring>
+#include <sstream>
 #include <string>
 #include <vector>
 
@@ -204,6 +205,97 @@ TEST_F(BlueStoreLifecycleTest, DbIsAccessible) {
 
     auto *db = store.get_db();
     ASSERT_NE(db, nullptr);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(BlueStoreLifecycleTest, PerfCountersInitialized) {
+    BlueStore store;
+    auto cfg = make_config();
+
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto *perf = store.get_perf_counters();
+    ASSERT_NE(perf, nullptr);
+    EXPECT_EQ(perf->get_name(), "bluestore");
+    EXPECT_TRUE(perf->is_enabled());
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(BlueStoreLifecycleTest, PerfCountersTrackWriteAndRead) {
+    BlueStore store;
+    auto cfg = make_config();
+
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto *perf = store.get_perf_counters();
+    ASSERT_NE(perf, nullptr);
+
+    auto coll = store.create_collection(1, 0);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid(1, 0, "", "test_obj", "", 0, 0);
+
+    bufferlist write_bl;
+    write_bl.append("hello world", 11);
+    std::vector<BlueStoreTransaction> tls;
+    BlueStoreTransaction bt;
+    bt.write(oid, 0, 11, write_bl);
+    tls.push_back(std::move(bt));
+
+    bool committed = false;
+    ASSERT_EQ(store.queue_transactions(coll, tls,
+                                       [&]() { committed = true; }),
+              0);
+    coll->get_osr()->drain();
+    ASSERT_TRUE(committed);
+
+    EXPECT_GT(perf->get(l_bluestore_txc), 0);
+    EXPECT_GT(perf->get(l_bluestore_write_small) +
+                  perf->get(l_bluestore_write_big),
+              0);
+
+    bufferlist read_bl;
+    ASSERT_EQ(store.read(coll, oid, 0, 11, read_bl), 11);
+    EXPECT_EQ(read_bl.length(), 11);
+
+    auto [sum, count] = perf->get_tavg_ns(l_bluestore_read_lat);
+    EXPECT_GT(count, 0);
+
+    auto [csum, ccount] = perf->get_tavg_ns(l_bluestore_commit_lat);
+    EXPECT_GT(ccount, 0);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(BlueStoreLifecycleTest, PerfCountersDump) {
+    BlueStore store;
+    auto cfg = make_config();
+
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 0);
+    ghobject_t oid(1, 0, "", "obj1", "", 0, 0);
+    bufferlist write_bl;
+    write_bl.append("data", 4);
+    std::vector<BlueStoreTransaction> tls;
+    BlueStoreTransaction bt;
+    bt.write(oid, 0, 4, write_bl);
+    tls.push_back(std::move(bt));
+    store.queue_transactions(coll, tls);
+    coll->get_osr()->drain();
+
+    JSONFormatter f;
+    store.dump_perf_counters(&f);
+    std::ostringstream os;
+    f.flush(os);
+    std::string out = os.str();
+
+    EXPECT_NE(out.find("txc_count"), std::string::npos);
 
     ASSERT_EQ(store.umount(), 0);
 }
