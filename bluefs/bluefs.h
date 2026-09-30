@@ -18,8 +18,27 @@
 #include "bluefs/bluefs_volume_selector.h"
 #include "common/buffer.h"
 #include "common/common_fwd.h"
+#include "common/formatter.h"
+#include "common/perf_counter.h"
 
 namespace TOPNSPC {
+
+enum {
+    l_bluefs_first = 1,
+    l_bluefs_db_total_bytes,
+    l_bluefs_db_used_bytes,
+    l_bluefs_wal_total_bytes,
+    l_bluefs_wal_used_bytes,
+    l_bluefs_num_files,
+    l_bluefs_log_bytes,
+    l_bluefs_log_compactions,
+    l_bluefs_log_write_count,
+    l_bluefs_logged_bytes,
+    l_bluefs_read_count,
+    l_bluefs_read_bytes,
+    l_bluefs_bytes_written,
+    l_bluefs_last,
+};
 
 class BlueFS {
 public:
@@ -117,6 +136,9 @@ public:
     const bluefs_super_t &get_super() const { return super_; }
     bluefs_super_t &get_mutable_super() { return super_; }
     int compact_log();
+
+    PerfCounters *get_perf_counters() const { return perf_.get(); }
+    void dump_perf_counters(Formatter *f);
 
 private:
     // =====================================================================
@@ -324,6 +346,11 @@ private:
     int _flush_and_sync_log(uint64_t want_seq = 0);
     int _maybe_extend_log();
     int _consume_dirty(uint64_t seq);
+
+    void _init_logger();
+    void _update_logger_stats();
+
+    std::unique_ptr<PerfCounters> perf_;
 };
 
 }  // namespace TOPNSPC

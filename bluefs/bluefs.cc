@@ -389,6 +389,8 @@ int BlueFS::_flush_data(FileWriter *h, uint64_t offset, uint64_t length,
         if (r < 0) return r;
         h->dirty_devs[it->bdev] = true;
 
+        if (perf_) perf_->inc(l_bluefs_bytes_written, x_len);
+
         bloff += x_len;
         remaining -= x_len;
         x_off = 0;
@@ -556,6 +558,11 @@ int BlueFS::_flush_and_sync_log(uint64_t want_seq) {
     _flush_bdev(log_.writer);
     log_.writer->buffer.clear();
     log_l.unlock();
+
+    if (perf_) {
+        perf_->inc(l_bluefs_log_write_count);
+        perf_->inc(l_bluefs_logged_bytes, bl.length());
+    }
 
     {
         std::lock_guard d(dirty_.lock);
@@ -998,6 +1005,9 @@ int BlueFS::mount() {
     log_.writer->pos = log_file->fnode.size;
     log_file->fnode.reset_delta();
 
+    _init_logger();
+    _update_logger_stats();
+
     return 0;
 }
 
@@ -1037,6 +1047,7 @@ void BlueFS::umount(bool avoid_compact) {
     log_.t.clear();
     super_ = bluefs_super_t{};
     log_.seq_live = 1;
+    perf_.reset();
 }
 
 // =====================================================================
@@ -1184,12 +1195,22 @@ int64_t BlueFS::_read_random(FileReader *h, uint64_t off, uint64_t len,
 
 int64_t BlueFS::read(FileReader *h, uint64_t off, size_t len,
                      bufferlist *outbl, char *out) {
-    return _read(h, off, len, outbl, out);
+    int64_t ret = _read(h, off, len, outbl, out);
+    if (perf_ && ret > 0) {
+        perf_->inc(l_bluefs_read_count);
+        perf_->inc(l_bluefs_read_bytes, static_cast<uint64_t>(ret));
+    }
+    return ret;
 }
 
 int64_t BlueFS::read_random(FileReader *h, uint64_t off, uint64_t len,
                             char *out) {
-    return _read_random(h, off, len, out);
+    int64_t ret = _read_random(h, off, len, out);
+    if (perf_ && ret > 0) {
+        perf_->inc(l_bluefs_read_count);
+        perf_->inc(l_bluefs_read_bytes, static_cast<uint64_t>(ret));
+    }
+    return ret;
 }
 
 // =====================================================================
@@ -1659,7 +1680,10 @@ int BlueFS::_compact_log_async() {
     }
 
     log_is_compacting_ = false;
-    return 0;
+    if (perf_ && ret == 0) {
+        perf_->inc(l_bluefs_log_compactions);
+    }
+    return ret;
 }
 
 void BlueFS::_maybe_compact_log() {
@@ -1769,6 +1793,74 @@ uint64_t BlueFS::get_used(unsigned id) {
         return _get_total(id) - alloc_[id]->get_free();
     }
     return 0;
+}
+
+void BlueFS::_init_logger() {
+    PerfCountersBuilder b("bluefs", l_bluefs_first, l_bluefs_last);
+
+    b.add_u64(l_bluefs_db_total_bytes, "db_total_bytes",
+              "Total bytes (main db device)", "b",
+              PerfCountersBuilder::PRIO_USEFUL, UNIT_BYTES);
+    b.add_u64(l_bluefs_db_used_bytes, "db_used_bytes",
+              "Used bytes (main db device)", "u",
+              PerfCountersBuilder::PRIO_USEFUL, UNIT_BYTES);
+    b.add_u64(l_bluefs_wal_total_bytes, "wal_total_bytes",
+              "Total bytes (wal device)", "walb",
+              PerfCountersBuilder::PRIO_USEFUL, UNIT_BYTES);
+    b.add_u64(l_bluefs_wal_used_bytes, "wal_used_bytes",
+              "Used bytes (wal device)", "walu",
+              PerfCountersBuilder::PRIO_USEFUL, UNIT_BYTES);
+    b.add_u64(l_bluefs_num_files, "num_files", "File count", "f",
+              PerfCountersBuilder::PRIO_USEFUL);
+    b.add_u64(l_bluefs_log_bytes, "log_bytes", "Size of the metadata log",
+              "jlen", PerfCountersBuilder::PRIO_INTERESTING, UNIT_BYTES);
+    b.add_u64_counter(l_bluefs_log_compactions, "log_compactions",
+                      "Compactions of the metadata log");
+    b.add_u64_counter(l_bluefs_log_write_count, "log_write_count",
+                      "Write op count to the metadata log");
+    b.add_u64_counter(l_bluefs_logged_bytes, "logged_bytes",
+                      "Bytes written to the metadata log", "j",
+                      PerfCountersBuilder::PRIO_CRITICAL, UNIT_BYTES);
+    b.add_u64_counter(l_bluefs_read_count, "read_count",
+                      "Read requests processed", nullptr,
+                      PerfCountersBuilder::PRIO_USEFUL);
+    b.add_u64_counter(l_bluefs_read_bytes, "read_bytes",
+                      "Bytes requested in read mode", nullptr,
+                      PerfCountersBuilder::PRIO_USEFUL, UNIT_BYTES);
+    b.add_u64_counter(l_bluefs_bytes_written, "bytes_written",
+                      "Bytes written to disk", "wb",
+                      PerfCountersBuilder::PRIO_CRITICAL, UNIT_BYTES);
+
+    perf_ = b.create_perf_counters();
+}
+
+void BlueFS::_update_logger_stats() {
+    if (!perf_) return;
+
+    if (BDEV_DB < bdev_.size() && bdev_[BDEV_DB]) {
+        perf_->set(l_bluefs_db_total_bytes, _get_total(BDEV_DB));
+        perf_->set(l_bluefs_db_used_bytes, get_used(BDEV_DB));
+    }
+    if (BDEV_WAL < bdev_.size() && bdev_[BDEV_WAL]) {
+        perf_->set(l_bluefs_wal_total_bytes, _get_total(BDEV_WAL));
+        perf_->set(l_bluefs_wal_used_bytes, get_used(BDEV_WAL));
+    }
+
+    {
+        std::lock_guard<std::mutex> l(nodes_.lock);
+        perf_->set(l_bluefs_num_files,
+                   static_cast<uint64_t>(nodes_.file_map.size()));
+    }
+
+    if (log_.writer && log_.writer->file) {
+        perf_->set(l_bluefs_log_bytes, log_.writer->file->fnode.size);
+    }
+}
+
+void BlueFS::dump_perf_counters(Formatter *f) {
+    if (!perf_) return;
+    _update_logger_stats();
+    perf_->dump(f, false);
 }
 
 }  // namespace TOPNSPC

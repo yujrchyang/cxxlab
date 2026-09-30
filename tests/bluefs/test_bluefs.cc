@@ -11,6 +11,7 @@
 #include <cstdlib>
 #include <cstring>
 #include <set>
+#include <sstream>
 #include <string>
 #include <thread>
 #include <vector>
@@ -18,6 +19,7 @@
 #include "blk/block_device.h"
 #include "blk/kernel_device.h"
 #include "bluefs/bluefs.h"
+#include "common/formatter.h"
 #include "cxxlab_test.h"
 
 using namespace TOPNSPC;
@@ -2632,6 +2634,96 @@ TEST_F(BlueFSTest, ConcurrentWritesToDifferentFiles) {
     std::vector<std::string> ls;
     ASSERT_EQ(fs.readdir("d", &ls), 0);
     EXPECT_EQ((int)ls.size(), kNumThreads * kNumWrites);
+
+    fs.umount();
+}
+
+// ============================================================================
+// PerfCounters tests
+// ============================================================================
+
+TEST_F(BlueFSTest, PerfCountersInitialized) {
+    BlueFSConfig cfg;
+    cfg.alloc_size = 4096;
+    cfg.shared_alloc_size = 65536;
+
+    BlueFS fs(cfg);
+    ASSERT_NO_FATAL_FAILURE(fs.add_block_device(BlueFS::BDEV_DB, tmp_path_));
+    ASSERT_EQ(fs.mkfs(cfg.alloc_size), 0);
+    ASSERT_EQ(fs.mount(), 0);
+
+    auto *perf = fs.get_perf_counters();
+    ASSERT_NE(perf, nullptr);
+    EXPECT_EQ(perf->get_name(), "bluefs");
+    EXPECT_TRUE(perf->is_enabled());
+
+    fs.umount();
+}
+
+TEST_F(BlueFSTest, PerfCountersTrackWriteAndRead) {
+    BlueFSConfig cfg;
+    cfg.alloc_size = 4096;
+    cfg.shared_alloc_size = 65536;
+
+    BlueFS fs(cfg);
+    ASSERT_NO_FATAL_FAILURE(fs.add_block_device(BlueFS::BDEV_DB, tmp_path_));
+    ASSERT_EQ(fs.mkfs(cfg.alloc_size), 0);
+    ASSERT_EQ(fs.mount(), 0);
+
+    auto *perf = fs.get_perf_counters();
+    ASSERT_NE(perf, nullptr);
+
+    ASSERT_EQ(fs.mkdir("d"), 0);
+    BlueFS::FileWriter *w = nullptr;
+    ASSERT_EQ(fs.open_for_write("d", "f", &w), 0);
+    std::string data(4096, 'X');
+    ASSERT_EQ(fs.append_try_flush(w, data.data(), data.size()), 0);
+    ASSERT_EQ(fs.fsync(w), 0);
+    fs.close_writer(w);
+
+    EXPECT_GT(perf->get(l_bluefs_log_write_count), 0);
+    EXPECT_GT(perf->get(l_bluefs_logged_bytes), 0);
+    EXPECT_GT(perf->get(l_bluefs_bytes_written), 0);
+
+    BlueFS::FileReader *r = nullptr;
+    ASSERT_EQ(fs.open_for_read("d", "f", &r), 0);
+    bufferlist bl;
+    int64_t n = fs.read(r, 0, data.size(), &bl);
+    EXPECT_EQ(n, (int64_t)data.size());
+
+    EXPECT_GT(perf->get(l_bluefs_read_count), 0);
+    EXPECT_GT(perf->get(l_bluefs_read_bytes), 0);
+
+    fs.close_reader(r);
+    fs.umount();
+}
+
+TEST_F(BlueFSTest, PerfCountersDump) {
+    BlueFSConfig cfg;
+    cfg.alloc_size = 4096;
+    cfg.shared_alloc_size = 65536;
+
+    BlueFS fs(cfg);
+    ASSERT_NO_FATAL_FAILURE(fs.add_block_device(BlueFS::BDEV_DB, tmp_path_));
+    ASSERT_EQ(fs.mkfs(cfg.alloc_size), 0);
+    ASSERT_EQ(fs.mount(), 0);
+
+    BlueFS::FileWriter *w = nullptr;
+    ASSERT_EQ(fs.mkdir("d"), 0);
+    ASSERT_EQ(fs.open_for_write("d", "f", &w), 0);
+    std::string data(4096, 'D');
+    ASSERT_EQ(fs.append_try_flush(w, data.data(), data.size()), 0);
+    ASSERT_EQ(fs.fsync(w), 0);
+    fs.close_writer(w);
+
+    JSONFormatter f;
+    fs.dump_perf_counters(&f);
+    std::ostringstream os;
+    f.flush(os);
+    std::string out = os.str();
+
+    EXPECT_NE(out.find("log_write_count"), std::string::npos);
+    EXPECT_NE(out.find("num_files"), std::string::npos);
 
     fs.umount();
 }
