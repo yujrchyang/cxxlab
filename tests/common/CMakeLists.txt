@@ -199,3 +199,12 @@ target_link_libraries(test_object
         GTest::gtest_main
 )
 add_test(NAME test_object COMMAND test_object)
+
+add_executable(test_perf_counter test_perf_counter.cc)
+target_include_directories(test_perf_counter PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_perf_counter
+    PRIVATE
+        common
+        GTest::gtest_main
+)
+add_test(NAME test_perf_counter COMMAND test_perf_counter)

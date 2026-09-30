@@ -8,6 +8,7 @@ add_library(common SHARED
     formatter.cc
     logger.cc
     object.cc
+    perf_counter.cc
     safe_io.cc
     spinlock.cc
     throttle.cc

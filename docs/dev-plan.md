@@ -792,10 +792,165 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
   - `BufferCache::trim()`: 跳过 WRITING buffer (移到 front) 继续淘汰 CLEAN buffer，防止 WRITING 堵住 LRU 尾部导致缓存无限膨胀
   - `BufferCache::flush()`: 同步清理 `BufferSpace::writing_` 列表，防止悬垂指针
 
+## 阶段五：R7 可观测性与运维（P2，16 项）[ ]
+
+> Ceph 参考：`src/common/perf_counters.h`（PerfCountersBuilder/PerfCounters 框架）、`src/os/bluestore/BlueStore.h:3314`（BSPerfTracker）、`BlueStore.h:3350-3378`（error injection）、`BlueStore.cc:5035`（`_init_logger` 注册约 60 个计数器）。
+> cxxlab 简化基线：无 CephContext / PerfCountersCollection / ceph-mgr / histogram / mempool；avg_tracker 用 `sum+count` 原子做 long-running average；error injection 不含 SharedBlob/misreference/zombie（Deferred ADR-04）。
+
+### 5.1 PerfCounters 基础框架 [ ]
+
+| 文件 | 内容 |
+| --- | --- |
+| `common/perf_counter.h`、`common/perf_counter.cc` | `PerfCounter`（Type: `U64_COUNTER`/`U64_GAUGE`/`TIME_AVG`，atomic 存储）、`PerfCounters` 容器（name→idx，线程安全）、`PerfCountersBuilder`（`add_u64_counter`/`add_u64`/`add_time_avg`、`create_perf_counters()`）、`dump(Formatter*)` |
+
+- Ceph ref: `perf_counters.h` `PerfCountersBuilder` + `perfcounter_type_d` + `PRIO_*`
+- 简化: 无 CephContext 依赖；无 histogram（deferred）；TIME_AVG 用 `(sum, count)` 双原子做 long-running average
+- R7 映射: #15 BSPerfTracker 容器、#1 基础性能计数器
+- 测试: builder add → tick → dump 验证值正确；并发 inc 无竞争
+
+### 5.2 BlueStore PerfCounters 集成 + BSPerfTracker [ ]
+
+| 文件 | 内容 |
+| --- | --- |
+| `bluestore/bluestore.h` | 加 `PerfCounters *perf_` + `BSPerfTracker perf_tracker_` 成员 |
+| `bluestore/bluestore.cc` | `_init_logger()`、插桩 hooks、`dump_perf_counters()` |
+
+- 计数器: 状态机延迟（11 态：prepare/aio_wait/io_done/kv_queued/kv_committing/kv_done/finishing/done + deferred 3 态）、`txc_count`、`read_lat`/`read_eio`、`write_big`/`write_small` + bytes、`kv_flush`/`kv_commit`/`kv_sync`/`kv_final` 延迟、cache size/avail/onode
+- 插桩点: `queue_transactions`（throttle/submit 起 tick）、`_txc_state_proc`（每次状态转移记前一态延迟）、`_kv_sync_thread_main`、`_kv_finalize_thread_main`、`read()`、`_do_alloc_write`
+- BSPerfTracker: `commit_latency_ns`/`apply_latency_ns` 两个 avg，`update_from_perfcounters()` + `get_cur_stats()`
+- Ceph ref: `BlueStore.h:3314` BSPerfTracker、`BlueStore.cc:5035` `_init_logger`
+- 简化: 去掉 compression 统计（ADR-03 Deferred）、去掉 shared_blob tracker；约 30 个计数器（Ceph 约 60）
+- R7 映射: #1、#2、#15、#22（设备统计部分）
+- 测试: 跑 write/read → 验证 `txc_count`/`read_lat`/`write_small` 递增、延迟 > 0
+
+### 5.3 最简 Benchmark 基线 [ ]
+
+| 文件 | 内容 |
+| --- | --- |
+| `tests/bench/bench_bluestore.cc`、`tests/bench/CMakeLists.txt` | 复用 `BlueStoreTestFixture`；4 个 workload：small_write（4KB×N）、big_write（1MB×N）、read_random、mixed（50/50）；测 wall-clock p50/p99 延迟 + 吞吐 MB/s + 调 `dump_perf_counters` |
+
+- 定位: 不是调优框架，只产出基线数字 + 给 5.2 计数器真实负载
+- 与重构关系: 阶段六拆分 `bluestore.cc` 后用此基线对比验证行为无回归
+- 测试: benchmark 跑通，产出非零数字
+
+### 5.4 Error Injection 框架 [ ]
+
+| 文件 | 内容 |
+| --- | --- |
+| `bluestore/error_injector.h`、`bluestore/error_injector.cc` | `ErrorInjector` 类：`inject_data_error(oid)`/`inject_mdata_error(oid)`（`std::set<ghobject_t>` + mutex）、`inject_leaked(len)`（alloc 不记 freelist）、`inject_false_free(coll,oid)`（标已分配为空闲）、`check_data_error`/`check_mdata_error`（read 路径查）、`clear()` |
+| `bluestore/bluestore_config.h` | 加 `inject_read_err_rate`/`inject_write_err_rate`/`inject_kv_err_rate`（概率型，默认 0） |
+
+- Ceph ref: `BlueStore.h:3351` `inject_data_error`/`inject_mdata_error`、`BlueStore.cc:10139` `inject_leaked`、`BlueStore.cc:10159` `inject_false_free`
+- 简化: 不含 SharedBlob/misreference/zombie_spanning（依赖 Deferred ADR-04）；概率型替代 Ceph 的确定型 oid-set（更易覆盖随机路径）
+- R7 映射: #10 框架
+- 测试: 注入 data error → read 返回 -EIO；注入 leaked → fsck 检出；注入 false_free → fsck 检出
+
+### 5.5 Error Injection 注入点（write/read/kv/device）[ ]
+
+| 文件 | 内容 |
+| --- | --- |
+| `bluestore/bluestore.cc` | write/read/kv 注入 hooks |
+| `blk/kernel_device.cc` | device 注入 |
+| `bluestore/bluestore_config.h` | 注入概率配置项 |
+
+- write 注入: `_do_alloc_write` 按 `inject_write_err_rate` 注入 `-ENOSPC`；`_wctx_finish` 偶发跳过 release（制造泄漏）
+- read 注入: `_do_read` 前查 `check_data_error` → -EIO；onode 加载查 `check_mdata_error` → -EIO
+- kv 注入: `_txc_write_nodes` 按 `inject_kv_err_rate` 注入 RocksDB put 失败（返回 -EIO），验证 txc 回滚
+- device 注入: `KernelDevice::read`/`write` 按 `inject_*_err_rate` 注入 EIO
+- R7 映射: #11、#12、#13、#14
+- 测试: 各注入点触发预期错误 + 事务正确回滚（STATE_PREPARE→aborted），不残留半状态
+
+### 5.6 BlueFS Perf Counters [ ]
+
+| 文件 | 内容 |
+| --- | --- |
+| `bluefs/bluefs.h` | 加 `PerfCounters *perf_` 成员 |
+| `bluefs/bluefs.cc` | `_init_perf()`、hooks、`dump_perf_counters()` |
+
+- 计数器: `log_flush_count`/`log_flush_bytes`、`log_compact_count`、`alloc_bytes`/`free_bytes`、`read_bytes`/`write_bytes`、`files_open`
+- 插桩点: `_flush_and_sync_log`、`_compact_log_async`、`_allocate`、`read`/`read_random`、`open_for_write`/`close_writer`
+- R7 映射: #16
+- 测试: BlueFS 写读 → 计数器递增；压缩触发 → compact_count 递增
+
+### 5.7 空间/分配器统计 [ ]
+
+| 文件 | 内容 |
+| --- | --- |
+| `bluestore/bluestore.cc` | `volatile_statfs`（运行时 used/avail） |
+| `blk/allocator.h` | stats 暴露（fragmentation/alloc_count/release_count） |
+| `bluestore/buffer_cache.h` | cache hit/miss/size 统计 |
+
+- 内容: `volatile_statfs`（运行时 used/avail：sum `alloc_->get_alloc_stats` + `fm_` free）；分配器 fragmentation/alloc_count/release_count；cache hit/miss/size
+- R7 映射: #5、#24（缓存统计）、#26（空间使用统计）
+- 测试: 分配 N 字节 → statfs 反映；cache 命中率随访问模式变化
+
+### 5.8 KV 统计 + PREFIX_STAT [ ]
+
+| 文件 | 内容 |
+| --- | --- |
+| `kv/key_value_db.h` | stats 接口 |
+| `kv/rocksdb_store.cc`、`kv/mem/mem_db.cc` | hooks |
+| `kv/merge_op/` | Int64ArrayMergeOperator merge_count/merge_bytes |
+
+- 内容: `PREFIX_STAT("T")` 统计前缀；`Int64ArrayMergeOperator` merge_count/merge_bytes；KV 层 get/put/delete/iter count + commit_lat
+- Ceph ref: KeyValueDB stats、Int64ArrayMergeOperator
+- R7 映射: #3、#4
+- 测试: KV ops → 计数器；merge ops → merge 统计
+
+### 5.9 FSCK 进度 + 配置热更新 [ ]
+
+| 文件 | 内容 |
+| --- | --- |
+| `bluestore/bluestore.cc` | FSCK 进度回调 |
+| `bluestore/bluestore_config.h` | `md_config_obs_t` 配置 reload |
+
+- 内容: FSCK 进度回调（`_fsck_check_objects` 遍历时百分比回调）；`md_config_obs_t`（静态配置 reload：重读 config 文件，应用非 mount-time 设置如 throttle/cache_size）
+- R7 映射: #9、#20、#21（per-pool 统计，简化为全局）
+- 简化: per-pool 统计简化为全局（无 PG 概念）；config 热更新仅限运行时可变项
+- 测试: fsck 带 progress 回调验证百分比递增；reload config → throttle 上限变化生效
+
+### 阶段五依赖图
+
+```plaintext
+阶段五: R7 可观测性与运维
+
+  5.1 PerfCounters framework
+  5.2 BlueStore Perf + BSPerfTracker ─── 5.1
+  5.3 Benchmark baseline ─── 5.2
+  5.4 ErrorInjector framework ─── no dep
+  5.5 Inject points ─── 5.4
+  5.6 BlueFS perf ─── 5.1
+  5.7 Space/alloc stats ─── 5.2
+  5.8 KV stats + PREFIX_STAT ─── 5.1
+  5.9 FSCK progress + config reload ─── 5.2
+```
+
+可并行: 5.1 完成后，5.4/5.6/5.8 可与 5.2 并行推进；5.3 必须等 5.2。
+
+---
+
+## 阶段五设计决策
+
+- `get_tavg_ns()` / `get_avg()` 统一返回 `{sum, count}` 顺序（Ceph `get_tavg_ns` 返回 `{count, sum}`）。cxxlab 统一为 `{sum, count}` 使结构化绑定 `auto [sum, count]` 更直觉
+- `PerfCounters` 私有构造 + `PerfCountersBuilder` 友元（替代 Ceph `make_unique` 无法访问私有构造的问题），Builder 内部用 `new PerfCounters(...)` 直接构造
+- 所有原子操作使用 `memory_order_relaxed`（性能优先，perf 计数器允许轻微不一致）；`read_avg()` 双检循环保证读取 `(sum, count)` 一致对
+- `enabled_` 原子标志按 store 粒度开关（替代 Ceph 的 `cct->_conf->perf` 全局开关）
+- `reset()` 跳过纯 U64 gauge（`type == PERFCOUNTER_U64`），匹配 Ceph 语义：gauge 代表当前状态不清零，counter/avg 可重置
+- 无 PerfCountersCollection：每个 store 持有自己的 `PerfCounters`，避免引入全局单例
+- 新增 `get_avg(idx)` 方法（Ceph 无）：通用于任何 `LONGRUNAVG` 类型，`get_tavg_ns` 限 `TIME | LONGRUNAVG`
+
+---
+
+## 阶段六：重构（R7 落地后）[ ]
+
+| 步骤 | 内容 | 验证手段 |
+| --- | --- | --- |
+| 6.1 | 拆分 `bluestore.cc`（约 2200 行）按 read/write/admin/fsck/lifecycle 分文件，插桩调用点随之搬迁但 `PerfCounters`/`ErrorInjector` 抽象层不动 | 5.3 基线对比 + 全量回归 |
+| 6.2 | 回填高风险简化项: blob reuse 双向搜索、deferred 批处理、read 三阶段流水线（`_read_cache`/`_prepare_read_ioc`/`_generate_read_result_bl`） | 5.5 注入点 + 5.3 基线 |
+| 6.3 | compress_extent_map / punch_hole / checksum 偏移补 property/fuzz 测试 | 新增 fuzz 测试 |
+
+---
+
 ## 下一步
 
-阶段三 BlueStore 核心引擎 MVP + P1 已全部完成。后续可选方向:
-
-1. Phase 3.18 补充: Buffer Cache 分片 (多 shard) + 2Q 淘汰策略
-2. 性能基准测试 + 调优
-3. 上层 OSD 接口对接
+阶段一至四全部完成（BlueFS + BlueRocksEnv + Throttle + BlueStore MVP/P1 + BTier）。当前推进阶段五 R7 可观测性与运维（P2），完成后进入阶段六重构。起点: 5.1 PerfCounters 基础框架。
