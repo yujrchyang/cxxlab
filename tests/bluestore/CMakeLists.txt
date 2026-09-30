@@ -198,3 +198,15 @@ target_link_libraries(test_error_injector
         GTest::gtest_main
 )
 add_test(NAME test_error_injector COMMAND test_error_injector)
+
+add_executable(test_fsck_progress_config test_fsck_progress_config.cc)
+target_include_directories(test_fsck_progress_config PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_fsck_progress_config
+    PRIVATE
+        bluestore
+        kv
+        blk
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_fsck_progress_config COMMAND test_fsck_progress_config)

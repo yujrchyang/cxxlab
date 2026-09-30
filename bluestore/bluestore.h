@@ -66,7 +66,16 @@ enum {
     l_bluestore_last,
 };
 
-class BlueStore {
+class ConfigObserver {
+public:
+    virtual ~ConfigObserver() = default;
+    virtual const char **get_tracked_conf_keys() const = 0;
+    virtual void handle_conf_change(
+        const BlueStoreConfig &cfg,
+        const std::set<std::string> &changed) = 0;
+};
+
+class BlueStore : public ConfigObserver {
 public:
     BlueStore();
     ~BlueStore();
@@ -121,11 +130,25 @@ public:
         FSCK_DEEP,     // Deep checks including data read verification
     };
 
-    int fsck(bool deep);
-    int repair(bool deep);
-    int quick_fix();
+    struct FsckProgress {
+        FSCKDepth depth;
+        std::string phase;
+        uint64_t processed = 0;
+        uint64_t total = 0;
+        int64_t errors = 0;
+    };
+    using FsckProgressCallback = std::function<void(const FsckProgress &)>;
+
+    int fsck(bool deep, FsckProgressCallback cb = nullptr);
+    int repair(bool deep, FsckProgressCallback cb = nullptr);
+    int quick_fix(FsckProgressCallback cb = nullptr);
 
     void set_config(const BlueStoreConfig &cfg) { cfg_ = cfg; }
+    void reload_config(const BlueStoreConfig &cfg);
+
+    const char **get_tracked_conf_keys() const override;
+    void handle_conf_change(const BlueStoreConfig &cfg,
+                            const std::set<std::string> &changed) override;
 
     void txc_aio_finish(void *p);
 
@@ -135,6 +158,8 @@ public:
     ErrorInjector *get_error_injector() const {
         return error_injector_.get();
     }
+
+    BufferCache *get_buffer_cache() const { return buffer_cache_.get(); }
 
 private:
     int _open_bdev(const std::string &path);
@@ -203,12 +228,16 @@ private:
                         std::map<std::string, bufferlist> *out);
 
     // FSCK internal methods
-    int _fsck(FSCKDepth depth, bool repair);
-    int64_t _fsck_check_collections();
+    int _fsck(FSCKDepth depth, bool repair,
+              FsckProgressCallback cb = nullptr);
+    int64_t _fsck_check_collections(FSCKDepth depth,
+                                    FsckProgressCallback cb = nullptr);
     int64_t _fsck_check_objects(FSCKDepth depth,
-                                std::set<uint64_t> &used_blocks);
+                                std::set<uint64_t> &used_blocks,
+                                FsckProgressCallback cb = nullptr);
     int64_t _fsck_check_freelist(const std::set<uint64_t> &used_blocks,
-                                 bool repair);
+                                 bool repair, FSCKDepth depth,
+                                 FsckProgressCallback cb = nullptr);
 
     // Deferred write
     bluestore_deferred_op_t *_get_deferred_op(TransContext *txc, uint64_t len);

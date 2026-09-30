@@ -2068,32 +2068,48 @@ void BlueStore::_finish_write(TransContext *txc) {
 
 // FSCK implementation
 
-int BlueStore::fsck(bool deep) {
-    return _fsck(deep ? FSCK_DEEP : FSCK_REGULAR, false);
+namespace {
+void report_fsck(const BlueStore::FsckProgressCallback &cb,
+                 BlueStore::FSCKDepth depth, const char *phase,
+                 uint64_t processed, uint64_t total, int64_t errors) {
+    if (!cb) return;
+    BlueStore::FsckProgress p;
+    p.depth = depth;
+    p.phase = phase;
+    p.processed = processed;
+    p.total = total;
+    p.errors = errors;
+    cb(p);
+}
+}  // namespace
+
+int BlueStore::fsck(bool deep, FsckProgressCallback cb) {
+    return _fsck(deep ? FSCK_DEEP : FSCK_REGULAR, false, std::move(cb));
 }
 
-int BlueStore::repair(bool deep) {
-    return _fsck(deep ? FSCK_DEEP : FSCK_REGULAR, true);
+int BlueStore::repair(bool deep, FsckProgressCallback cb) {
+    return _fsck(deep ? FSCK_DEEP : FSCK_REGULAR, true, std::move(cb));
 }
 
-int BlueStore::quick_fix() {
-    return _fsck(FSCK_SHALLOW, true);
+int BlueStore::quick_fix(FsckProgressCallback cb) {
+    return _fsck(FSCK_SHALLOW, true, std::move(cb));
 }
 
-int BlueStore::_fsck(FSCKDepth depth, bool repair) {
+int BlueStore::_fsck(FSCKDepth depth, bool repair,
+                     FsckProgressCallback cb) {
     int64_t errors = 0;
     int64_t repaired = 0;
 
     bool live_mode = mounted_ && db_ && bdev_ && fm_;
 
     if (live_mode) {
-        errors += _fsck_check_collections();
+        errors += _fsck_check_collections(depth, cb);
 
         std::set<uint64_t> used_blocks;
-        errors += _fsck_check_objects(depth, used_blocks);
+        errors += _fsck_check_objects(depth, used_blocks, cb);
 
         if (depth != FSCK_SHALLOW) {
-            errors += _fsck_check_freelist(used_blocks, repair);
+            errors += _fsck_check_freelist(used_blocks, repair, depth, cb);
             if (repair) repaired = errors;
         }
 
@@ -2166,13 +2182,13 @@ int BlueStore::_fsck(FSCKDepth depth, bool repair) {
     bdev_.swap(fsck_bdev);
     fm_ = fsck_fm;
 
-    errors += _fsck_check_collections();
+    errors += _fsck_check_collections(depth, cb);
 
     std::set<uint64_t> used_blocks;
-    errors += _fsck_check_objects(depth, used_blocks);
+    errors += _fsck_check_objects(depth, used_blocks, cb);
 
     if (depth != FSCK_SHALLOW && bdev_ && fm_) {
-        errors += _fsck_check_freelist(used_blocks, repair);
+        errors += _fsck_check_freelist(used_blocks, repair, depth, cb);
         if (repair) {
             repaired = errors;
         }
@@ -2191,12 +2207,16 @@ int BlueStore::_fsck(FSCKDepth depth, bool repair) {
     return repair ? (errors - repaired) : errors;
 }
 
-int64_t BlueStore::_fsck_check_collections() {
+int64_t BlueStore::_fsck_check_collections(FSCKDepth depth,
+                                           FsckProgressCallback cb) {
     int64_t errors = 0;
+
+    report_fsck(cb, depth, "collections", 0, 0, 0);
 
     auto it = db_->get_iterator(PREFIX_COLL);
     if (!it) return -EIO;
 
+    uint64_t processed = 0;
     it->seek_to_first();
     while (it->valid()) {
         std::string key = it->key();
@@ -2223,13 +2243,16 @@ int64_t BlueStore::_fsck_check_collections() {
         }
 
         it->next();
+        ++processed;
     }
 
+    report_fsck(cb, depth, "collections", processed, processed, errors);
     return errors;
 }
 
 int64_t BlueStore::_fsck_check_objects(FSCKDepth depth,
-                                       std::set<uint64_t> &used_blocks) {
+                                       std::set<uint64_t> &used_blocks,
+                                       FsckProgressCallback cb) {
     int64_t errors = 0;
 
     // Use cfg_.min_alloc_size as fallback if min_alloc_size_ is not set
@@ -2239,9 +2262,24 @@ int64_t BlueStore::_fsck_check_objects(FSCKDepth depth,
         return 0;
     }
 
+    report_fsck(cb, depth, "objects", 0, 0, 0);
+
     auto it = db_->get_iterator(PREFIX_OBJ);
     if (!it) return -EIO;
 
+    // Pre-scan to estimate total object count (count only, no decode)
+    uint64_t total = 0;
+    if (cb) {
+        it->seek_to_first();
+        while (it->valid()) {
+            ++total;
+            it->next();
+        }
+    }
+    report_fsck(cb, depth, "objects", 0, total, 0);
+
+    uint64_t processed = 0;
+    uint64_t report_interval = std::max<uint64_t>(100, total / 100);
     it->seek_to_first();
     while (it->valid()) {
         std::string key = it->key();
@@ -2315,14 +2353,22 @@ int64_t BlueStore::_fsck_check_objects(FSCKDepth depth,
         }
 
         it->next();
+        ++processed;
+        if (cb && (processed % report_interval) == 0) {
+            report_fsck(cb, depth, "objects", processed, total, errors);
+        }
     }
 
+    report_fsck(cb, depth, "objects", processed, processed, errors);
     return errors;
 }
 
 int64_t BlueStore::_fsck_check_freelist(const std::set<uint64_t> &used_blocks,
-                                        bool repair) {
+                                        bool repair, FSCKDepth depth,
+                                        FsckProgressCallback cb) {
     int64_t errors = 0;
+
+    report_fsck(cb, depth, "freelist", 0, 0, 0);
 
     // Use cfg_.min_alloc_size as fallback if min_alloc_size_ is not set
     uint64_t min_alloc = min_alloc_size_ > 0 ? min_alloc_size_ : cfg_.min_alloc_size;
@@ -2376,7 +2422,53 @@ int64_t BlueStore::_fsck_check_freelist(const std::set<uint64_t> &used_blocks,
         }
     }
 
+    report_fsck(cb, depth, "freelist", 0, 0, errors);
     return errors;
+}
+
+const char **BlueStore::get_tracked_conf_keys() const {
+    static const char *keys[] = {
+        "buffer_cache_size",
+        "onode_cache_size",
+        "inject_read_err_rate",
+        "inject_write_err_rate",
+        "inject_kv_err_rate",
+        nullptr,
+    };
+    return keys;
+}
+
+void BlueStore::handle_conf_change(const BlueStoreConfig &cfg,
+                                   const std::set<std::string> &changed) {
+    if (changed.count("buffer_cache_size")) {
+        if (buffer_cache_) {
+            buffer_cache_->set_max_bytes(cfg.buffer_cache_size);
+        }
+    }
+    if (changed.count("onode_cache_size")) {
+        std::lock_guard<std::mutex> l(coll_lock_);
+        for (auto &[id, coll] : coll_map_) {
+            coll->set_onode_cache_size(cfg.onode_cache_size);
+        }
+    }
+    // inject_*_err_rate: stored in cfg_ (updated by reload_config);
+    // should_inject reads cfg_ directly, no extra action needed.
+}
+
+void BlueStore::reload_config(const BlueStoreConfig &new_cfg) {
+    std::set<std::string> changed;
+    if (new_cfg.buffer_cache_size != cfg_.buffer_cache_size)
+        changed.insert("buffer_cache_size");
+    if (new_cfg.onode_cache_size != cfg_.onode_cache_size)
+        changed.insert("onode_cache_size");
+    if (new_cfg.inject_read_err_rate != cfg_.inject_read_err_rate)
+        changed.insert("inject_read_err_rate");
+    if (new_cfg.inject_write_err_rate != cfg_.inject_write_err_rate)
+        changed.insert("inject_write_err_rate");
+    if (new_cfg.inject_kv_err_rate != cfg_.inject_kv_err_rate)
+        changed.insert("inject_kv_err_rate");
+    cfg_ = new_cfg;
+    handle_conf_change(cfg_, changed);
 }
 
 void BlueStore::_init_logger() {

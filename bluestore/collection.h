@@ -27,7 +27,11 @@ public:
     void clear();
     size_t size() const { return cache_.size(); }
     bool empty() const { return cache_.empty(); }
-    void set_max_size(size_t max_size) { max_size_ = max_size; }
+    void set_max_size(size_t max_size) {
+        std::lock_guard<std::mutex> l(lock_);
+        max_size_ = max_size;
+    }
+    size_t get_max_size() const { return max_size_; }
 
 private:
     void evict_if_needed();
@@ -69,6 +73,11 @@ public:
     void set_cache(BufferCache *c) { cache_ = c; }
 
     size_t get_onode_count() const { return onode_space_.size(); }
+
+    void set_onode_cache_size(size_t size) {
+        onode_space_.set_max_size(size);
+    }
+    size_t get_onode_cache_max() const { return onode_space_.get_max_size(); }
 
     std::mutex &get_lock() { return lock_; }
 

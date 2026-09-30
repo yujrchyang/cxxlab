@@ -90,6 +90,13 @@ public:
     std::mutex &lock() { return lock_; }
 
     uint64_t get_max_bytes() const { return max_bytes_; }
+    void set_max_bytes(uint64_t max) {
+        {
+            std::lock_guard<std::mutex> l(lock_);
+            max_bytes_ = max;
+        }
+        trim();
+    }
     uint64_t get_cur_bytes() const { return cur_bytes_; }
     uint64_t get_hit_bytes() const { return hit_bytes_; }
     uint64_t get_miss_bytes() const { return miss_bytes_; }
