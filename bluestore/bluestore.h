@@ -61,6 +61,8 @@ enum {
     l_bluestore_onodes,
     l_bluestore_buffers,
     l_bluestore_buffer_bytes,
+    l_bluestore_buffer_hit_bytes,
+    l_bluestore_buffer_miss_bytes,
     l_bluestore_last,
 };
 

@@ -257,6 +257,8 @@ TEST_F(BlueStoreLifecycleTest, PerfCountersTrackWriteAndRead) {
     EXPECT_GT(perf->get(l_bluestore_write_small) +
                   perf->get(l_bluestore_write_big),
               0);
+    EXPECT_GT(perf->get(l_bluestore_stored), 0);
+    EXPECT_GT(perf->get(l_bluestore_allocated), 0);
 
     bufferlist read_bl;
     ASSERT_EQ(store.read(coll, oid, 0, 11, read_bl), 11);

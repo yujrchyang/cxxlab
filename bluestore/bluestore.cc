@@ -591,6 +591,7 @@ void BlueStore::_txc_add_transaction(TransContext *txc,
                 _assign_nid(txc, on);
                 bufferlist data = op.data;
                 _do_write(txc, txc->ch, on, op.offset, op.length, data);
+                txc->bytes += op.length;
                 txc->write_onode(on);
             }
             break;
@@ -757,7 +758,12 @@ void BlueStore::_txc_committed_kv(TransContext *txc) {
                                                                    txc->start)
                   .count();
     _log_latency(l_bluestore_commit_lat, static_cast<uint64_t>(ns));
-    if (perf_) perf_->inc(l_bluestore_txc);
+    if (perf_) {
+        perf_->inc(l_bluestore_txc);
+        if (txc->bytes > 0) {
+            perf_->inc(l_bluestore_stored, txc->bytes);
+        }
+    }
 }
 
 void BlueStore::_txc_finish(TransContext *txc) {
@@ -2464,6 +2470,12 @@ void BlueStore::_init_logger() {
     b.add_u64(l_bluestore_buffer_bytes, "buffer_bytes",
               "Number of bytes in buffer cache", nullptr,
               PerfCountersBuilder::PRIO_USEFUL, UNIT_BYTES);
+    b.add_u64_counter(l_bluestore_buffer_hit_bytes, "buffer_hit_bytes",
+                      "Cache hit bytes", nullptr,
+                      PerfCountersBuilder::PRIO_USEFUL, UNIT_BYTES);
+    b.add_u64_counter(l_bluestore_buffer_miss_bytes, "buffer_miss_bytes",
+                      "Cache miss bytes", nullptr,
+                      PerfCountersBuilder::PRIO_USEFUL, UNIT_BYTES);
 
     perf_ = b.create_perf_counters();
 }
@@ -2494,6 +2506,11 @@ void BlueStore::_refresh_perf_counters() {
     if (!perf_) return;
     perf_->set(l_bluestore_alloc_unit, min_alloc_size_);
 
+    if (bdev_ && alloc_) {
+        perf_->set(l_bluestore_allocated,
+                   bdev_->get_size() - alloc_->get_free());
+    }
+
     uint64_t num_onodes = 0;
     {
         std::lock_guard<std::mutex> lg(coll_lock_);
@@ -2506,6 +2523,10 @@ void BlueStore::_refresh_perf_counters() {
     if (buffer_cache_) {
         perf_->set(l_bluestore_buffers, buffer_cache_->get_num_buffers());
         perf_->set(l_bluestore_buffer_bytes, buffer_cache_->get_cur_bytes());
+        perf_->set(l_bluestore_buffer_hit_bytes,
+                   buffer_cache_->get_hit_bytes());
+        perf_->set(l_bluestore_buffer_miss_bytes,
+                   buffer_cache_->get_miss_bytes());
     }
 
     if (alloc_) {
