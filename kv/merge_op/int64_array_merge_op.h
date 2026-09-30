@@ -15,12 +15,14 @@ public:
 
     void merge_nonexistent(const char *rdata, size_t rlen,
                            std::string *new_value) override {
+        _record_merge(rlen);
         new_value->assign(rdata, rlen);
     }
 
     void merge(const char *ldata, size_t llen,
                const char *rdata, size_t rlen,
                std::string *new_value) override {
+        _record_merge(llen + rlen);
         size_t count = std::min(llen, rlen) / sizeof(int64_t);
         std::vector<int64_t> result(count);
         for (size_t i = 0; i < count; i++) {

@@ -1,5 +1,6 @@
 #pragma once
 
+#include <cstdint>
 #include <map>
 #include <memory>
 #include <optional>
@@ -11,6 +12,24 @@
 #include "kv/merge_op/merge_op.h"
 
 namespace TOPNSPC {
+
+class PerfCounters;
+class Formatter;
+
+// KV performance counter IDs (per-store PerfCounters, base 100)
+enum {
+    l_kv_first = 100,
+    l_kv_get_count,     // u64_counter: point-read calls
+    l_kv_put_count,     // u64_counter: TransactionImpl::set calls
+    l_kv_del_count,     // u64_counter: TransactionImpl::rmkey calls
+    l_kv_merge_count,   // u64_counter: TransactionImpl::merge calls
+    l_kv_iter_count,    // u64_counter: iterator creations
+    l_kv_submit_count,  // u64_counter: submit_transaction calls
+    l_kv_get_lat,       // time_avg:   point-read latency
+    l_kv_submit_lat,    // time_avg:   submit_transaction latency
+    l_kv_commit_lat,    // time_avg:   submit_transaction_sync latency
+    l_kv_last,
+};
 
 // ---------------------------------------------------------------------------
 // TransactionImpl
@@ -238,6 +257,18 @@ public:
     const std::vector<std::pair<std::string,
                                 std::shared_ptr<MergeOperator>>> &
     get_merge_ops() const { return merge_ops_; }
+
+    // ── Statistics ──────────────────────────────────────────
+    virtual PerfCounters *get_perf_counters() { return nullptr; }
+    virtual void get_statistics(Formatter *f) { (void)f; }
+
+    struct MergeOpStats {
+        std::string prefix;
+        std::string name;
+        uint64_t merge_count = 0;
+        uint64_t merge_bytes = 0;
+    };
+    std::vector<MergeOpStats> get_merge_op_stats() const;
 
     // ── Key encoding ───────────────────────────────────────
     // Ceph-compatible format: prefix + '\0' + inner_key

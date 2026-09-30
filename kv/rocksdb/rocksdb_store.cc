@@ -113,24 +113,29 @@ struct RocksDBStore::RDBTransactionImpl : public TransactionImpl {
     ::rocksdb::WriteBatch batch;
     ::rocksdb::DB *db = nullptr;
     uint64_t delete_range_threshold = 0;
+    PerfCounters *perf = nullptr;
 
     explicit RDBTransactionImpl(::rocksdb::DB *db_,
-                                uint64_t dr_threshold)
-        : db(db_), delete_range_threshold(dr_threshold) {}
+                                uint64_t dr_threshold,
+                                PerfCounters *perf_ = nullptr)
+        : db(db_), delete_range_threshold(dr_threshold), perf(perf_) {}
 
     void set(const std::string &prefix, const std::string &k,
              const bufferlist &bl) override {
+        if (perf) perf->inc(l_kv_put_count);
         auto s = bl.to_str();
         batch.Put(encode_key(prefix, k), ::rocksdb::Slice(s));
     }
 
     void rmkey(const std::string &prefix,
                const std::string &k) override {
+        if (perf) perf->inc(l_kv_del_count);
         batch.Delete(encode_key(prefix, k));
     }
 
     void rm_single_key(const std::string &prefix,
                        const std::string &k) override {
+        if (perf) perf->inc(l_kv_del_count);
         batch.SingleDelete(encode_key(prefix, k));
     }
 
@@ -194,6 +199,7 @@ struct RocksDBStore::RDBTransactionImpl : public TransactionImpl {
 
     void merge(const std::string &prefix, const std::string &k,
                const bufferlist &value) override {
+        if (perf) perf->inc(l_kv_merge_count);
         auto s = value.to_str();
         batch.Merge(encode_key(prefix, k), ::rocksdb::Slice(s));
     }
@@ -373,6 +379,7 @@ int RocksDBStore::open_db(::rocksdb::Options opts,
         out << "RocksDB open failed: " << s.ToString() << std::endl;
         return -EIO;
     }
+    _init_perf();
     return 0;
 }
 
@@ -397,6 +404,7 @@ int RocksDBStore::open_read_only(std::ostream &out) {
             << std::endl;
         return -EIO;
     }
+    _init_perf();
     return 0;
 }
 
@@ -410,6 +418,7 @@ int RocksDBStore::repair(std::ostream &out) {
 }
 
 void RocksDBStore::close() {
+    _shutdown_perf();
     if (db_) {
         delete db_;
         db_ = nullptr;
@@ -417,23 +426,44 @@ void RocksDBStore::close() {
     adapter_.reset();
 }
 
+void RocksDBStore::_init_perf() {
+    PerfCountersBuilder plb("kv_rocksdb", l_kv_first, l_kv_last);
+    plb.add_u64_counter(l_kv_get_count, "get_count", "Point-read calls");
+    plb.add_u64_counter(l_kv_put_count, "put_count", "Transaction set calls");
+    plb.add_u64_counter(l_kv_del_count, "del_count", "Transaction rmkey calls");
+    plb.add_u64_counter(l_kv_merge_count, "merge_count", "Transaction merge calls");
+    plb.add_u64_counter(l_kv_iter_count, "iter_count", "Iterator creations");
+    plb.add_u64_counter(l_kv_submit_count, "submit_count", "submit_transaction calls");
+    plb.add_time_avg(l_kv_get_lat, "get_lat", "Point-read latency");
+    plb.add_time_avg(l_kv_submit_lat, "submit_lat", "submit_transaction latency");
+    plb.add_time_avg(l_kv_commit_lat, "commit_lat", "submit_transaction_sync latency");
+    perf_ = plb.create_perf_counters();
+}
+
+void RocksDBStore::_shutdown_perf() {
+    perf_.reset();
+}
+
 Transaction RocksDBStore::get_transaction() {
-    return std::make_shared<RDBTransactionImpl>(db_, delete_range_threshold_);
+    return std::make_shared<RDBTransactionImpl>(db_, delete_range_threshold_,
+                                                perf_.get());
 }
 
 int RocksDBStore::submit_transaction(Transaction t) {
+    PerfGuard guard(perf_.get(), l_kv_submit_lat);
     auto rdb_t = std::static_pointer_cast<RDBTransactionImpl>(t);
     auto s = db_->Write(::rocksdb::WriteOptions(), &rdb_t->batch);
+    if (perf_) perf_->inc(l_kv_submit_count);
     return s.ok() ? 0 : -EIO;
 }
 
 int RocksDBStore::submit_transaction_sync(Transaction t) {
+    PerfGuard guard(perf_.get(), l_kv_commit_lat);
     auto rdb_t = std::static_pointer_cast<RDBTransactionImpl>(t);
     ::rocksdb::WriteOptions wopts;
     wopts.sync = true;
     auto s = db_->Write(wopts, &rdb_t->batch);
-    if (!s.ok()) {
-    }
+    if (perf_) perf_->inc(l_kv_submit_count);
     return s.ok() ? 0 : -EIO;
 }
 
@@ -450,6 +480,7 @@ int RocksDBStore::get(
     const std::string &prefix,
     const std::set<std::string> &keys,
     std::map<std::string, bufferlist> *out) {
+    PerfGuard guard(perf_.get(), l_kv_get_lat);
     std::vector<std::string> full_keys;
     full_keys.reserve(keys.size());
     for (auto &k : keys)
@@ -475,11 +506,13 @@ int RocksDBStore::get(
         ++kit;
         ++i;
     }
+    if (perf_) perf_->inc(l_kv_get_count);
     return 0;
 }
 
 WholeSpaceIterator RocksDBStore::get_wholespace_iterator(
     IteratorOpts opts) {
+    if (perf_) perf_->inc(l_kv_iter_count);
     ::rocksdb::ReadOptions ropts;
     if (opts & ITERATOR_NOCACHE)
         ropts.fill_cache = false;

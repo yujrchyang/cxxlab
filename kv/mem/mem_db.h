@@ -8,6 +8,7 @@
 #include <string>
 #include <vector>
 
+#include "common/perf_counter.h"
 #include "kv/key_value_db.h"
 
 namespace TOPNSPC {
@@ -37,11 +38,16 @@ public:
     uint64_t get_estimated_size(
         std::map<std::string, uint64_t> &extra) override;
 
+    PerfCounters *get_perf_counters() override { return perf_.get(); }
+
     friend class MDBWholeSpaceIteratorImpl;
 
 private:
     class MDBTransactionImpl;
     class MDBWholeSpaceIteratorImpl;
+
+    void _init_perf();
+    void _shutdown_perf();
 
     void _set_key(const std::string &full_key,
                   const bufferlist &bl);
@@ -57,6 +63,7 @@ private:
     mutable std::mutex m_lock_;
     std::map<std::string, std::string> db_;
     uint64_t seqno_ = 0;
+    std::unique_ptr<PerfCounters> perf_;
 };
 
 }  // namespace TOPNSPC

@@ -10,6 +10,7 @@
 #include <rocksdb/db.h>
 #include <rocksdb/merge_operator.h>
 
+#include "common/perf_counter.h"
 #include "kv/key_value_db.h"
 
 namespace TOPNSPC {
@@ -50,6 +51,8 @@ public:
     uint64_t get_estimated_size(
         std::map<std::string, uint64_t> &extra) override;
 
+    PerfCounters *get_perf_counters() override { return perf_.get(); }
+
 private:
     // ── Nested types ────────────────────────────────────────
     class RDBTransactionImpl;
@@ -59,6 +62,8 @@ private:
     // ── Helpers ─────────────────────────────────────────────
     int open_db(rocksdb::Options opts, std::ostream &out);
     void setup_merge_adapter(::rocksdb::Options &opts);
+    void _init_perf();
+    void _shutdown_perf();
 
     // ── Members ─────────────────────────────────────────────
     rocksdb::DB *db_ = nullptr;
@@ -67,6 +72,7 @@ private:
     std::shared_ptr<RocksDBMergeAdapter> adapter_;
     uint64_t delete_range_threshold_ = 0;
     rocksdb::Options cached_opts_;
+    std::unique_ptr<PerfCounters> perf_;
 };
 
 }  // namespace TOPNSPC

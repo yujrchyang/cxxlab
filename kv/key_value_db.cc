@@ -133,6 +133,15 @@ Iterator KeyValueDB::make_iterator(const std::string &prefix,
         std::move(w_iter), prefix, std::move(bounds));
 }
 
+std::vector<KeyValueDB::MergeOpStats> KeyValueDB::get_merge_op_stats() const {
+    std::vector<MergeOpStats> result;
+    for (const auto &[prefix, mop] : merge_ops_) {
+        result.push_back({prefix, mop->name(),
+                          mop->get_merge_count(), mop->get_merge_bytes()});
+    }
+    return result;
+}
+
 // ===================================================================
 // Factory
 // ===================================================================

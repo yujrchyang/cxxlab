@@ -220,14 +220,17 @@ int MemDB::init(const std::string &options_str) {
 }
 
 int MemDB::open(std::ostream &out) {
+    _init_perf();
     return 0;
 }
 
 int MemDB::create_and_open(std::ostream &out) {
+    _init_perf();
     return 0;
 }
 
 void MemDB::close() {
+    _shutdown_perf();
     std::lock_guard<std::mutex> lock(m_lock_);
     db_.clear();
 }
@@ -237,14 +240,17 @@ Transaction MemDB::get_transaction() {
 }
 
 int MemDB::submit_transaction(Transaction t) {
+    PerfGuard guard(perf_.get(), l_kv_submit_lat);
     auto mdb_t = std::static_pointer_cast<MDBTransactionImpl>(t);
     std::lock_guard<std::mutex> lock(m_lock_);
     for (auto &op : mdb_t->ops) {
         switch (op.type) {
         case OpType::SET:
+            if (perf_) perf_->inc(l_kv_put_count);
             _set_key(encode_key(op.prefix, op.key), op.value);
             break;
         case OpType::RMKEY:
+            if (perf_) perf_->inc(l_kv_del_count);
             _rmkey(encode_key(op.prefix, op.key));
             break;
         case OpType::RMKEY_BY_PREFIX:
@@ -254,6 +260,7 @@ int MemDB::submit_transaction(Transaction t) {
             _rm_range_keys(op.prefix, op.key, op.end);
             break;
         case OpType::MERGE: {
+            if (perf_) perf_->inc(l_kv_merge_count);
             int r = _merge(op.prefix, encode_key(op.prefix, op.key),
                            op.value);
             if (r) return r;
@@ -261,10 +268,12 @@ int MemDB::submit_transaction(Transaction t) {
         }
         }
     }
+    if (perf_) perf_->inc(l_kv_submit_count);
     return 0;
 }
 
 int MemDB::submit_transaction_sync(Transaction t) {
+    PerfGuard guard(perf_.get(), l_kv_commit_lat);
     return submit_transaction(std::move(t));
 }
 
@@ -272,6 +281,7 @@ int MemDB::get(
     const std::string &prefix,
     const std::set<std::string> &keys,
     std::map<std::string, bufferlist> *out) {
+    PerfGuard guard(perf_.get(), l_kv_get_lat);
     std::lock_guard<std::mutex> lock(m_lock_);
     for (auto &k : keys) {
         auto full = encode_key(prefix, k);
@@ -282,11 +292,13 @@ int MemDB::get(
             (*out)[k] = std::move(bl);
         }
     }
+    if (perf_) perf_->inc(l_kv_get_count);
     return 0;
 }
 
 WholeSpaceIterator MemDB::get_wholespace_iterator(
     IteratorOpts opts) {
+    if (perf_) perf_->inc(l_kv_iter_count);
     std::lock_guard<std::mutex> lock(m_lock_);
     MDBWholeSpaceIteratorImpl::Items items;
     items.reserve(db_.size());
@@ -297,6 +309,24 @@ WholeSpaceIterator MemDB::get_wholespace_iterator(
 }
 
 void MemDB::compact() {}
+
+void MemDB::_init_perf() {
+    PerfCountersBuilder plb("kv_memdb", l_kv_first, l_kv_last);
+    plb.add_u64_counter(l_kv_get_count, "get_count", "Point-read calls");
+    plb.add_u64_counter(l_kv_put_count, "put_count", "Transaction set calls");
+    plb.add_u64_counter(l_kv_del_count, "del_count", "Transaction rmkey calls");
+    plb.add_u64_counter(l_kv_merge_count, "merge_count", "Transaction merge calls");
+    plb.add_u64_counter(l_kv_iter_count, "iter_count", "Iterator creations");
+    plb.add_u64_counter(l_kv_submit_count, "submit_count", "submit_transaction calls");
+    plb.add_time_avg(l_kv_get_lat, "get_lat", "Point-read latency");
+    plb.add_time_avg(l_kv_submit_lat, "submit_lat", "submit_transaction latency");
+    plb.add_time_avg(l_kv_commit_lat, "commit_lat", "submit_transaction_sync latency");
+    perf_ = plb.create_perf_counters();
+}
+
+void MemDB::_shutdown_perf() {
+    perf_.reset();
+}
 
 uint64_t MemDB::get_estimated_size(
     std::map<std::string, uint64_t> &extra) {
