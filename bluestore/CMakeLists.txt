@@ -4,6 +4,7 @@ add_library(bluestore SHARED
     bluestore.cc
     bluestore_types.cc
     collection.cc
+    deferred_writer.cc
     error_injector.cc
     extent_map.cc
     onode.cc

@@ -14,6 +14,7 @@ namespace TOPNSPC {
 /// track in-flight io
 struct IOContext {
     void *priv = nullptr;
+    uint8_t type = 0;
     int r = 0;
 
     std::list<aio_t> pending_aios;  ///< not yet submitted

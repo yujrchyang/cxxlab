@@ -124,6 +124,16 @@ target_link_libraries(test_fuzz
 )
 add_test(NAME test_fuzz COMMAND test_fuzz)
 
+add_executable(test_deferred_writer test_deferred_writer.cc)
+target_include_directories(test_deferred_writer PRIVATE ${PROJECT_SOURCE_DIR})
+target_link_libraries(test_deferred_writer
+    PRIVATE
+        bluestore
+        cxxlab_test_helpers
+        GTest::gtest_main
+)
+add_test(NAME test_deferred_writer COMMAND test_deferred_writer)
+
 add_executable(test_zero_remove_attrs test_zero_remove_attrs.cc)
 target_include_directories(test_zero_remove_attrs PRIVATE ${PROJECT_SOURCE_DIR})
 target_link_libraries(test_zero_remove_attrs
