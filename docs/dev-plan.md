@@ -1191,25 +1191,25 @@ Ceph 参考: `BlueStore.h:2069-2095`（DeferredBatch）、`BlueStore.cc:3879-389
 
 ### 按需/缓做项
 
-#### ReadPipeline 模块（原 6.2）[ ]
+#### ReadPipeline 模块（原 6.2）[ ] 缓做
 
-benchmark 依赖，当前数据缺位，缓做。功能正确（`_do_read` `bluestore.cc:1109-1200` 已修复排序 bug 和 csum 偏移 bug），纯性能/可测性改进。
+评估结论: 缓做。收益有限（IO 合并场景少: BlueFS/RocksDB 读通常顺序，一个 extent 覆盖大部分读；csum 重试对永久损坏无效；当前 `bdev_->read(buffered=true)` 走 page cache，同步 pread 命中时不慢）。缺点明显（工作量大 300+ 行 + 风险高改 read API + 复杂度增加: 92 行单函数 vs 三阶段+5 数据结构 + buffered→aio_read 行为变化）。benchmark 低配环境无法验证。功能正确（`_do_read` 已修复排序 bug 和 csum 偏移 bug）。
 
-若实施: 新增 `bluestore/read_pipeline.h` + `.cc` + test。1 方法接口 `read(OnodeRef, offset, length, BlockDevice*, BufferCache*) → bufferlist`。内部三阶段（`_read_cache` / `_prepare_read_ioc` / `_generate_read_result_bl`）+ csum 重试。前置: 确认 `BlockDevice::aio_read` 可用。
+若实施: 新增 `bluestore/read_pipeline.h` + `.cc` + test。1 方法接口 `read(OnodeRef, offset, length, BlockDevice*, BufferCache*) → bufferlist`。内部三阶段（`_read_cache` / `_prepare_read_ioc` / `_generate_read_result_bl`）+ csum 重试。前置: `BlockDevice::aio_read` 可用（已确认）。
 
-仅在 benchmark 改进后（增大样本、多次运行、裸设备、预热、开 cache）证明读是瓶颈时推进。
+触发条件: benchmark 改进后证明读是瓶颈，或多 extent 读场景增多。
 
-#### TransContext 状态机迁移（原 6.3）[ ]
+#### TransContext 状态机迁移（原 6.3）[ ] 缓做
 
-纯架构，无 bug 无性能问题，缓做。基于源码确认: `STATE_DEFERRED_DONE` 是死状态（grep 确认全代码无 set_state 使用）；`_txc_state_proc` switch 缺 `case STATE_DEFERRED_QUEUED`/`STATE_DEFERRED_DONE`（靠外部 `_deferred_submit`/`_deferred_aio_finish` 推进）；set_state 12 处分散在 8 个函数。
+评估结论: 缓做。纯架构，无 bug 无性能问题。收益中（状态机内聚 + 死状态清理 + 可测性），缺点明显（工作量大 300+ 行 + 副作用内聚复杂 + BlueStoreEnv visitor 接口设计 + 近期无加状态计划）。6.8 DeferredWriter 提取后，txc 状态机更清晰（deferred 走 batch ioc type=1 → `_deferred_batch_aio_finish`，不涉及 txc AIO）。当前状态机功能正确（31+23+3 测试全过）。
 
-若实施: TransContext 新增 `advance(BlueStoreEnv& env)`，内部 11 态转换表；补齐缺失 case，消除死状态；15 个 public 字段逐步 private 化。建议在 6.8 之后做（DeferredWriter 提取已缩小 BlueStore surface）。仅在计划加新状态（compression/clone）时推进。
+基于源码确认: `STATE_DEFERRED_DONE` 是死状态（grep 确认全代码无 set_state 使用）；`_txc_state_proc` switch 缺 `case STATE_DEFERRED_QUEUED`/`STATE_DEFERRED_DONE`（靠外部 `_deferred_queue`→`deferred_writer_->queue` + `_deferred_batch_aio_finish` 推进）；set_state 12 处分散在 8 个函数。
 
-#### can_reuse_blob 对齐移除（原 6.4-B）[ ]
+若实施: TransContext 新增 `advance(BlueStoreEnv& env)`，内部 11 态转换表；补齐缺失 case，消除死状态；15 个 public 字段逐步 private 化。触发条件: 计划加新状态（compression/clone）。
 
-独立于 6.5，单独评估。`can_reuse_blob`（`blob.cc:86`）的 `new_blen = (new_blen + min_alloc_size - 1) & ~(min_alloc_size - 1)` 是 cxxlab 自己加的（Ceph 无）。但此行是为规避 BitmapAllocator 断言（dev-plan 已完成实现记录: "blob reuse 时 new_alloc_len 未按 min_alloc_size 对齐，导致 BitmapAllocator 断言失败"）。
+#### can_reuse_blob 对齐移除（原 6.4-B）[ ] 保留
 
-不能盲目跟 Ceph 对齐: 必须先查 BitmapAllocator 的对齐断言点，判断是合理防御（非对齐分配破坏位图）还是冗余。若是合理防御则保留并标注差异原因；若可放宽则移除。
+评估结论: 保留（合理防御）。`BitmapAllocator::allocate`（`bitmap_allocator.cc:779`）有 `cxxlab_assert(want % unit == 0)`，强制 want 对齐 min_alloc_size。`can_reuse_blob`（`blob.cc:86`）的对齐确保 `_do_alloc_write` 的 need 对齐 min_alloc_size，满足断言。移除会重新触发 3.19 修复过的断言。Ceph 无此行是因为 Ceph 的 BitmapAllocator 实现不同（不强制 want 对齐），cxxlab 的 BitmapAllocator 有此约束。差异是 cxxlab BitmapAllocator 的内部要求，不是 can_reuse_blob 的冗余。
 
 ### T7 SharedBlob 间接层 — 跳过
 
@@ -1239,4 +1239,4 @@ benchmark 依赖，当前数据缺位，缓做。功能正确（`_do_read` `blue
 
 ## 下一步
 
-阶段一至五全部完成（BlueFS + BlueRocksEnv + Throttle + BlueStore MVP/P1 + BTier + R7 可观测性与运维）。当前进入阶段六重构，按重排后的依赖顺序推进。起点: 6.1 修复 DeferredWriter 删 key bug（止血），随后 6.2 fuzz 验证，再进入 6.3 补全 blob 状态模型为 write RMW（6.5-6.7）铺路。
+阶段一至六全部完成（BlueFS + BlueRocksEnv + Throttle + BlueStore MVP/P1 + BTier + R7 可观测性与运维 + 阶段六重构 6.1-6.8）。阶段六主步骤: 6.1 deferred WAL key 止血 + 6.2 fuzz 基线 + 6.3 blob 状态模型 + 6.4 交错搜索 + 6.5 small write direct-write-unused/RMW + 6.6 big write deferred RMW + 6.7 zero→unused 标记 + 6.8 DeferredWriter 模块提取。缓做项: ReadPipeline（收益有限 + benchmark 无法验证）、TransContext 状态机（纯架构 + 近期无加状态）、can_reuse_blob 对齐移除（保留，合理防御）。缓做项触发条件: benchmark 改进后证明瓶颈、计划加新状态（compression/clone）。
