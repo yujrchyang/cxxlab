@@ -311,10 +311,12 @@ struct WriteContext {
         uint64_t b_off0;
         uint64_t length0;
         bool new_blob;
+        bool mark_unused;
 
         write_item(uint64_t loffs, BlobRef blob, uint64_t blen, uint64_t o,
-                   bufferlist &data, uint64_t o0, uint64_t len0, bool nb)
-            : logical_offset(loffs), b(blob), blob_length(blen), b_off(o), bl(data), b_off0(o0), length0(len0), new_blob(nb) {}
+                   bufferlist &data, uint64_t o0, uint64_t len0, bool nb,
+                   bool mu)
+            : logical_offset(loffs), b(blob), blob_length(blen), b_off(o), bl(data), b_off0(o0), length0(len0), new_blob(nb), mark_unused(mu) {}
     };
 
     unsigned csum_order = 0;
@@ -324,8 +326,9 @@ struct WriteContext {
     std::vector<OldExtent> old_extents;
 
     void write(uint64_t loffs, BlobRef b, uint64_t blen, uint64_t o,
-               bufferlist &data, uint64_t o0, uint64_t len0, bool nb) {
-        writes.emplace_back(loffs, b, blen, o, data, o0, len0, nb);
+               bufferlist &data, uint64_t o0, uint64_t len0, bool nb,
+               bool mu) {
+        writes.emplace_back(loffs, b, blen, o, data, o0, len0, nb, mu);
     }
 };
 

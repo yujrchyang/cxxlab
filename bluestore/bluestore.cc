@@ -1783,7 +1783,7 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
 
                     alloc_len = alloc_len32;
                     wctx->write(offset, ep->blob, alloc_len, b_off0,
-                                padded_bl, b_off_reuse, length, false);
+                                padded_bl, b_off_reuse, length, false, false);
                     return;
                 }
             }
@@ -1808,7 +1808,7 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
 
                     alloc_len = alloc_len32;
                     wctx->write(offset, prev_ep->blob, alloc_len, b_off0,
-                                padded_bl, b_off, length, false);
+                                padded_bl, b_off, length, false, false);
                     return;
                 }
             }
@@ -1833,7 +1833,8 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
     b->get();
     b->set_collection(ch);
 
-    wctx->write(offset, b, alloc_len, b_off0, padded_bl, b_off, length, true);
+    wctx->write(offset, b, alloc_len, b_off0, padded_bl, b_off, length, true,
+                min_alloc_size_ != block_size_);
     if (perf_) {
         perf_->inc(l_bluestore_write_small);
         perf_->inc(l_bluestore_write_small_bytes, length);
@@ -1976,7 +1977,7 @@ void BlueStore::_do_write_big(TransContext *txc, Collection *ch, OnodeRef o,
             b_off = 0;
         }
 
-        wctx->write(offset, b, l, b_off, chunk_bl, b_off, l, new_blob);
+        wctx->write(offset, b, l, b_off, chunk_bl, b_off, l, new_blob, false);
 
         if (perf_) {
             perf_->inc(l_bluestore_write_big);
@@ -2087,6 +2088,19 @@ int BlueStore::_do_alloc_write(TransContext *txc, OnodeRef o,
         }
 
         b->get_ref(wi.b_off0, wi.length0, min_alloc_size_);
+
+        if (wi.mark_unused) {
+            uint64_t b_off = wi.b_off0;
+            uint64_t b_end = b_off + wi.length0;
+            if (b_off > 0) {
+                dblob.add_unused(0, b_off);
+            }
+            uint64_t llen = dblob.get_logical_length();
+            if (b_end < llen) {
+                dblob.add_unused(b_end, llen - b_end);
+            }
+            dblob.mark_used(b_off, wi.length0);
+        }
 
         o->extent_map.set_lextent(wi.logical_offset, wi.b_off0, wi.length0, b,
                                   nullptr);

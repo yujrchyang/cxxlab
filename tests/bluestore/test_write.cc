@@ -1576,3 +1576,48 @@ TEST_F(WritePathTest, BigWriteDeferredPersistence) {
 
     ASSERT_EQ(store.umount(), 0);
 }
+
+TEST_F(WritePathTest, DirectWriteUnusedAutoTrigger) {
+    BlueStore store;
+    auto cfg = make_config();
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 55;
+    oid.oid = "direct_write_unused_auto";
+
+    auto do_write = [&](uint64_t off, const std::string &data) {
+        bufferlist bl;
+        bl.append(data);
+        BlueStoreTransaction bt;
+        bt.write(oid, off, bl.length(), bl);
+        std::vector<BlueStoreTransaction> tls;
+        tls.push_back(std::move(bt));
+        std::atomic<bool> committed{false};
+        EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+            committed = true;
+        }),
+                  0);
+        coll->get_osr()->flush();
+        EXPECT_TRUE(wait_commit(committed));
+    };
+
+    do_write(0, std::string(4096, 'A'));
+    do_write(4096, std::string(4096, 'B'));
+
+    auto do_read = [&](uint64_t off) -> std::string {
+        bufferlist bl;
+        EXPECT_EQ(store.read(coll, oid, off, 4096, bl), 4096);
+        return bl.to_str();
+    };
+
+    EXPECT_EQ(do_read(0), std::string(4096, 'A'));
+    EXPECT_EQ(do_read(4096), std::string(4096, 'B'));
+
+    ASSERT_EQ(store.umount(), 0);
+}
