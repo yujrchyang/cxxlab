@@ -1952,11 +1952,6 @@ void BlueStore::_deferred_queue(TransContext *txc) {
     std::lock_guard<std::mutex> l(deferred_lock_);
     deferred_queue_.push_back(txc);
 
-    // Count total IOs in this deferred transaction
-    for (auto &op : txc->deferred_txn->ops) {
-        deferred_pending_ios_ += op.extents.size();
-    }
-
     // Submit immediately (simplified approach)
     _deferred_submit();
 }
@@ -1988,28 +1983,29 @@ void BlueStore::_deferred_submit() {
         if (txc->ioc.has_pending_aios()) {
             bdev_->aio_submit(&txc->ioc);
         } else {
-            // No AIOs were submitted, transition directly to CLEANUP
+            bdev_->flush();
+            _remove_deferred_key(txc);
             txc->set_state(TransContext::STATE_DEFERRED_CLEANUP);
             _txc_state_proc(txc);
         }
     }
 }
 
-void BlueStore::_deferred_aio_finish(TransContext *txc) {
-    if (--deferred_pending_ios_ == 0) {
-        std::lock_guard<std::mutex> l(deferred_lock_);
-
-        auto it = db_->get_transaction();
-        for (auto &wt : deferred_queue_) {
-            std::string key;
-            key_encode_u64(wt->deferred_txn->seq, &key);
-            it->rmkey(PREFIX_DEFERRED, key);
-        }
-        db_->submit_transaction_sync(it);
+void BlueStore::_remove_deferred_key(TransContext *txc) {
+    if (!txc->deferred_txn) {
+        return;
     }
+    auto it = db_->get_transaction();
+    std::string key;
+    key_encode_u64(txc->deferred_txn->seq, &key);
+    it->rmkey(PREFIX_DEFERRED, key);
+    db_->submit_transaction_sync(it);
+}
 
+void BlueStore::_deferred_aio_finish(TransContext *txc) {
+    bdev_->flush();
+    _remove_deferred_key(txc);
     _finish_write(txc);
-
     txc->set_state(TransContext::STATE_DEFERRED_CLEANUP);
     _txc_state_proc(txc);
 }

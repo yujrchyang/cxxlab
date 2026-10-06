@@ -77,6 +77,16 @@ protected:
     }
 };
 
+static int count_deferred_keys(BlueStore &store) {
+    auto db = store.get_db();
+    auto it = db->get_iterator(PREFIX_DEFERRED);
+    int n = 0;
+    for (it->seek_to_first(); it->valid(); it->next()) {
+        ++n;
+    }
+    return n;
+}
+
 TEST_F(WritePathTest, WriteSmallData) {
     BlueStore store;
     auto cfg = make_config();
@@ -361,6 +371,186 @@ TEST_F(WritePathTest, DeferredWriteMultipleSmall) {
         EXPECT_EQ(read_bl.to_str(), expected);
     }
 
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, DeferredWriteRemountNoLeakedKey) {
+    BlueStore store;
+    auto cfg = make_config();
+    cfg.prefer_deferred_size = 32768;
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 40;
+    oid.oid = "deferred_no_leak";
+
+    uint64_t write_size = 4096;
+    std::string write_data(write_size, 'X');
+    for (size_t i = 0; i < write_data.size(); ++i) {
+        write_data[i] = 'A' + (i % 26);
+    }
+    bufferlist bl;
+    bl.append(write_data);
+
+    BlueStoreTransaction bt;
+    bt.write(oid, 0, bl.length(), bl);
+    std::vector<BlueStoreTransaction> tls;
+    tls.push_back(std::move(bt));
+
+    std::atomic<bool> committed{false};
+    EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+        committed = true;
+    }),
+              0);
+    coll->get_osr()->flush();
+    EXPECT_TRUE(wait_commit(committed));
+
+    ASSERT_EQ(store.umount(), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    EXPECT_EQ(count_deferred_keys(store), 0)
+        << "PREFIX_DEFERRED WAL key not removed after deferred completion";
+
+    auto coll2 = store.get_collection(1);
+    ASSERT_NE(coll2, nullptr);
+    bufferlist read_bl;
+    int r = store.read(coll2, oid, 0, write_size, read_bl);
+    EXPECT_EQ(r, (int)write_size);
+    EXPECT_EQ(read_bl.to_str(), write_data);
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, DeferredWriteSameStoreNoLeakedKey) {
+    BlueStore store;
+    auto cfg = make_config();
+    cfg.prefer_deferred_size = 32768;
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 42;
+    oid.oid = "deferred_same_store";
+
+    for (int i = 0; i < 5; ++i) {
+        uint64_t offset = i * 4096;
+        std::string write_data(4096, 'A' + i);
+        bufferlist bl;
+        bl.append(write_data);
+        BlueStoreTransaction bt;
+        bt.write(oid, offset, bl.length(), bl);
+        std::vector<BlueStoreTransaction> tls;
+        tls.push_back(std::move(bt));
+
+        std::atomic<bool> committed{false};
+        EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+            committed = true;
+        }),
+                  0);
+        coll->get_osr()->flush();
+        EXPECT_TRUE(wait_commit(committed));
+    }
+
+    EXPECT_EQ(count_deferred_keys(store), 0)
+        << "PREFIX_DEFERRED keys leaked after multiple deferred writes";
+
+    for (int i = 0; i < 5; ++i) {
+        uint64_t offset = i * 4096;
+        bufferlist read_bl;
+        int r = store.read(coll, oid, offset, 4096, read_bl);
+        EXPECT_EQ(r, 4096);
+        std::string expected(4096, 'A' + i);
+        EXPECT_EQ(read_bl.to_str(), expected);
+    }
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, DeferredWriteMultipleRemountNoAccumulation) {
+    auto cfg = make_config();
+    cfg.prefer_deferred_size = 32768;
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 41;
+    oid.oid = "deferred_multi_remount";
+
+    {
+        BlueStore store;
+        ASSERT_EQ(store.mkfs(cfg), 0);
+        ASSERT_EQ(store.mount(cfg), 0);
+        auto coll = store.create_collection(1, 5);
+        ASSERT_NE(coll, nullptr);
+
+        std::string write_data(4096, 'A');
+        bufferlist bl;
+        bl.append(write_data);
+        BlueStoreTransaction bt;
+        bt.write(oid, 0, bl.length(), bl);
+        std::vector<BlueStoreTransaction> tls;
+        tls.push_back(std::move(bt));
+
+        std::atomic<bool> committed{false};
+        EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+            committed = true;
+        }),
+                  0);
+        coll->get_osr()->flush();
+        EXPECT_TRUE(wait_commit(committed));
+        ASSERT_EQ(store.umount(), 0);
+    }
+
+    for (int round = 1; round <= 3; ++round) {
+        BlueStore store;
+        ASSERT_EQ(store.mount(cfg), 0);
+        auto coll = store.get_collection(1);
+        ASSERT_NE(coll, nullptr);
+
+        uint64_t offset = round * 4096;
+        std::string write_data(4096, 'A' + round);
+        bufferlist bl;
+        bl.append(write_data);
+        BlueStoreTransaction bt;
+        bt.write(oid, offset, bl.length(), bl);
+        std::vector<BlueStoreTransaction> tls;
+        tls.push_back(std::move(bt));
+
+        std::atomic<bool> committed{false};
+        EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+            committed = true;
+        }),
+                  0);
+        coll->get_osr()->flush();
+        EXPECT_TRUE(wait_commit(committed));
+        ASSERT_EQ(store.umount(), 0);
+
+        ASSERT_EQ(store.mount(cfg), 0);
+        EXPECT_EQ(count_deferred_keys(store), 0)
+            << "round " << round << ": PREFIX_DEFERRED key leaked";
+        ASSERT_EQ(store.umount(), 0);
+    }
+
+    BlueStore store;
+    ASSERT_EQ(store.mount(cfg), 0);
+    auto coll = store.get_collection(1);
+    ASSERT_NE(coll, nullptr);
+    for (int round = 0; round <= 3; ++round) {
+        uint64_t offset = round * 4096;
+        bufferlist read_bl;
+        int r = store.read(coll, oid, offset, 4096, read_bl);
+        EXPECT_EQ(r, 4096);
+        std::string expected(4096, 'A' + round);
+        EXPECT_EQ(read_bl.to_str(), expected);
+    }
     ASSERT_EQ(store.umount(), 0);
 }
 

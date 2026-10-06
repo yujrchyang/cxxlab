@@ -244,6 +244,7 @@ private:
     void _deferred_queue(TransContext *txc);
     void _deferred_submit();
     void _deferred_aio_finish(TransContext *txc);
+    void _remove_deferred_key(TransContext *txc);
     int _deferred_replay();
 
     void _buffer_cache_write(TransContext *txc, BlobRef b, uint64_t offset,
@@ -315,7 +316,6 @@ private:
     std::atomic<uint64_t> deferred_seq_{0};
     std::mutex deferred_lock_;
     std::deque<TransContext *> deferred_queue_;
-    std::atomic<int> deferred_pending_ios_{0};
 
     std::thread finisher_thread_;
     std::mutex finisher_lock_;

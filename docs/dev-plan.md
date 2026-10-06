@@ -943,15 +943,211 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 
 ## 阶段六：重构（R7 落地后）[ ]
 
-> 架构评审见 [docs/design/refactor-architecture-review.md](design/refactor-architecture-review.md)。核心方向: 用模块提取替代文件拆分——每次提取产出一个独立可测的深模块（自有 `.h`/`.cc`/test 文件，构造时不依赖 BlueStore），而非把 BlueStore 的成员函数搬到不同 `.cc` 文件。模块留在 `bluestore/` 目录下编入 `libbluestore.so`，与 `BufferCache`/`ExtentMap`/`Blob` 同级。
+> 核心方向: 用模块提取替代文件拆分——每次提取产出一个独立可测的深模块（自有 `.h`/`.cc`/test 文件，构造时不依赖 BlueStore），而非把 BlueStore 的成员函数搬到不同 `.cc` 文件。模块留在 `bluestore/` 目录下编入 `libbluestore.so`，与 `BufferCache`/`ExtentMap`/`Blob` 同级。
 
-### 6.1 提取 DeferredWriter 模块 [ ]
+### 必要性评估基础
 
-将 deferred write 的数据结构合并、生命周期状态机、提交链路收敛为一个独立可测模块，替代原 T5+T6 分散在 BlueStore 成员中的方案。
+原六个重构点经源码审查 + Ceph 完整实现对照后，按"不做会怎样"重新分级:
 
-cxxlab 现状: `_deferred_queue`（`bluestore.cc:1951`）立即 submit 无合并；`_deferred_submit`（`bluestore.cc:1964`）逐 extent `aio_write` 无 IO 聚合；无 pending/running 分离；`_deferred_aio_finish`（`bluestore.cc:1998`）有 bug（遍历已空的 `deferred_queue_` 删 key）；kv_sync 无 deferred_done→flush→stable 链路。
+- 删 key bug（原 6.1 内）: 正确性必修。`_deferred_aio_finish`（`bluestore.cc:1998-2015`）遍历被 `_deferred_submit:1965` swap 清空的 `deferred_queue_`，rmkey 走不到，`PREFIX_DEFERRED` WAL key 永不删除，导致累积 + 重复重放 + 潜在数据损坏
+- write RMW（原 6.5）: 项目需求定为必须，补全 BlueStore 写路径完整功能
+- 其余（ReadPipeline、状态机迁移、对齐移除）: 性能或纯架构，当前 benchmark 在低配开发环境信噪比差（块设备为文件系统文件、big_write 仅 20 样本算 p99、buffer_cache 默认关闭、无 warmup、64MB 设备测不到累积），不作为性能决策依据
 
-Ceph 参考: `BlueStore.h:2069-2095`（`DeferredBatch`）、`BlueStore.cc:3879-3899`（`prepare_write`）、`3901-3965`（`_discard`）、`13860-13903`（`_deferred_queue`）、`13941-13999`（`_deferred_submit_unlock`）、`14009-14063`（`_deferred_aio_finish`）、`13905-13939`（`deferred_try_submit`）、`13355-13403`（kv_sync flush）、`13607-13623`（kv_finalize deferred_stable）。
+决策基于正确性、代码可审查性与 Ceph 对照，不依赖 benchmark 性能数据。benchmark 改进（增大样本、多次运行、裸设备、预热、开 cache）本身是额外工作且低配环境上限有限，不作为重构前置门槛。
+
+### 新执行顺序与依赖
+
+```plaintext
+6.1 fix deferred rmkey bug (stopgap)   ─── independent
+6.2 fuzz test baseline                 ─── 6.1
+6.3 blob state model (RMW prerequisite)─── independent
+6.4 blob reuse interleaved search      ─── 6.3
+6.5 small write direct-write-unused+RMW─── 6.3, 6.4
+6.6 BigDeferredWriteContext + big RMW  ─── 6.3
+6.7 zero detection to unused marking   ─── 6.5
+6.8 extract DeferredWriter module      ─── 6.1, 6.5, 6.6
+
+on-demand / deferred:
+  ReadPipeline (was 6.2)              ─── benchmark dependent
+  TransContext state machine (was 6.3)─── pure architecture
+  can_reuse_blob align removal (was 6.4-B) ─── BitmapAllocator assert eval
+```
+
+依据:
+
+- 6.1 止血必须先于 6.5/6.6（否则 RMW 大量产生 deferred op 时 WAL 累积更严重）
+- 6.3 是 6.5/6.6 的真实前置（cxxlab 裁剪了 unused 位图 + is_mutable 语义错误，详见 6.3）
+- 6.4 与 6.5 强耦合（同在 `_do_write_small` 的 do-while 循环体），必须一起做
+- 6.5/6.6 先于 6.8（模块提取）: 6.5/6.6 大量产生 deferred op，先实现再由 6.8 收敛接口更自然
+
+### 6.1 修复 DeferredWriter 删 key bug（止血）[ ]
+
+cxxlab 现状（`bluestore.cc:1998-2015`）:
+
+```text
+1965: _deferred_submit() swap 清空 deferred_queue_
+2003: for (auto &wt : deferred_queue_) { ... rmkey }  ← 遍历空队列
+```
+
+`deferred_pending_ios_` 全局原子计数归零时遍历已被 swap 清空的 `deferred_queue_`，rmkey 永不执行。后果链:
+
+1. `PREFIX_DEFERRED` WAL key 永不删除 → 长期运行 WAL 表无限增长
+2. 每次 mount `_deferred_replay`（`bluestore.cc:2017`）重放所有历史 deferred 事务 → mount 时间随运行时长线性增长
+3. 重放把 deferred 数据 aio_write 回原物理 offset，若该块已释放给别的对象复用 → 潜在数据损坏
+
+改动（最小止血）: `_deferred_aio_finish` 改为遍历当前 txc 自身的 `deferred_txn` 删 key（而非全局 `deferred_queue_`），或用 set 跟踪待删 key。不涉及模块提取，纯 bug 修复。
+
+验证: `tests/bluestore/test_write.cc` deferred 组 + 新增"deferred 写后 remount 验证 WAL key 已删"测试
+
+风险: 低（纯逻辑修复，无状态机改动）
+
+### 6.2 Fuzz 测试基线 [ ]
+
+依赖 6.1（验证删 key bug 修复彻底性）。低成本高收益，零回归风险。
+
+| 测试目标 | 内容 | Ceph 参考 |
+| --- | --- | --- |
+| compress_extent_map | 随机 extent 序列，验证 compress 后物理连续性（相邻 extent blob 物理偏移连续才可合并） | `ExtentMap::compress_extent_map` |
+| punch_hole | 随机 offset+length punch hole，验证结果无重叠、无空洞残留 | `ExtentMap::punch_hole` |
+| checksum 偏移 | 随机 blob offset 读，验证 csum 校验的 chunk 对齐与偏移映射正确 | `_verify_csum` |
+
+测试框架: GoogleTest property-based（或简单 fuzz：随机种子 + N 轮随机操作序列），新增 `tests/bluestore/test_fuzz.cc`。
+
+可提前到 6.4 之前: compress_extent_map/punch_hole/csum 偏移三个目标当前代码已稳定，fuzz 能验证 6.1 修复彻底性并为 6.5 测试铺路。
+
+### 6.3 补全 blob 状态模型（RMW 前置）[ ]
+
+cxxlab 现状（`bluestore_types.h:181-195`）: `bluestore_blob_t` 裁剪了 unused 位图机制，且 `is_mutable` 语义错误。对比 Ceph:
+
+| 机制 | Ceph | cxxlab | 影响 |
+| --- | --- | --- | --- |
+| `unused` 位图字段 | `unused_t unused`（`bluestore_types.h:467`） | 无（仅保留 FLAG_HAS_UNUSED 标志） | 无法实现 is_unused/add_unused/mark_used |
+| `is_mutable()` | `!is_compressed() && !is_shared()`（586） | `!has_flag(FLAG_HAS_UNUSED)`（243） | 语义错误: has_unused 的 blob 被误判不可变 |
+| `is_allocated()` | 有（655，_validate_range require_allocated=true） | 无（仅有 is_unallocated） | direct-write-unused/RMW 条件无法判断 |
+| `is_unused()` | 有（666，查 unused 位图） | 无 | direct-write-unused 条件无法判断 |
+| `add_unused`/`mark_used` | 有（685/702） | 无 | 无法标记 chunk 从未写过 |
+
+关键矛盾: cxxlab 保留了 FLAG_HAS_UNUSED 标志和 `has_unused()` 查询，但裁剪了位图本身。`is_mutable()` 被错误绑到 has_unused（Ceph 绑到 compressed/shared，cxxlab 无这两个标志应等价恒 true）。`can_reuse_blob`（`blob.cc:93`）也用 `has_unused()` 拒绝复用。结果: has_unused 的 blob 完全不可修改，direct-write-unused 无从谈起。
+
+is_mutable 调用点共 6 处（grep 确认），全在写路径: `blob.cc:50`、`bluestore.cc:1642/1669/1750/1769`。改语义爆破半径可控: 放行更多 blob 后还有 can_reuse_blob 或新增的 direct-write-unused/RMW 二次判断。
+
+改动:
+
+| 文件 | 内容 |
+| --- | --- |
+| `bluestore/bluestore_types.h` | 加 `unused_t unused` 字段（参考 Ceph 467）；`is_mutable()` 改为恒 true（cxxlab 无 compression/shared）；补 `is_allocated()`（`_validate_range(b_off, b_len, true)`，已有 is_unallocated 的对称）；补 `is_unused()`/`add_unused()`/`mark_used()`（参考 Ceph 666-709）；DENC 版本升级 |
+| `bluestore/blob.cc` | `can_reuse_blob`（93）移除 `if (has_unused()) return false;`（Ceph 无此检查） |
+
+Ceph 参考: `bluestore_types.h:467`（unused 字段）、`586-588`（is_mutable）、`628-651`（_validate_range）、`655-663`（is_allocated/is_unallocated）、`666-699`（is_unused/add_unused）、`702-712`（mark_used）。
+
+测试: `tests/bluestore/test_bluestore_types.cc` 加 unused 位图 roundtrip + is_unused/is_allocated 边界（offset 越界、跨 chunk、全 unused/全 used 混合）。
+
+风险: 中。DENC 版本升级破坏旧数据兼容（cxxlab 实验项目可接受，需确认无存量数据需迁移）。实施前 grep 确认无其他 is_mutable 依赖（已确认 6 处全在写路径）。
+
+### 6.4 blob reuse 交错搜索 [ ]
+
+与 6.5 强耦合: 6.5 的 direct-write-unused/RMW 分支要加在 `_do_write_small` 的 do-while 循环体内，若先做 6.5（两段式加分支）再改 6.4（重构成 do-while），会重复改同一区域。
+
+cxxlab 现状: `_do_write_small`（`bluestore.cc:1620-1711`）和 `_do_write_big`（`bluestore.cc:1713-1805`）用 forward for 全穷尽（1638-1661/1746-1761）再 backward while（1663-1691/1763-1783）的两段式。Ceph 是 do-while 交错（`BlueStore.cc:14910-15211` small、`15524-15568` big）: 每轮先 forward 再 backward，任一命中即退出，保证物理距离最近的复用 blob。
+
+改动: `_do_write_small` 和 `_do_write_big` 的 forward+backward 搜索改为 do-while 交错模式。
+
+验证: `tests/bluestore/test_write.cc`（已有 22 测试）全回归 + 新增"前后都有可复用 blob 时选物理距离最近"场景。
+
+风险: 低（纯算法改进，test_write 22 测试可验证正确性）。注意: 交错搜索改变复用选择可能影响现有测试期望，需逐个核对。
+
+### 6.5 small write direct-write-unused + RMW [ ]
+
+cxxlab 现状: `_do_write_small`（`bluestore.cc:1620-1711`）仅 `can_reuse_blob` 单一复用路径（分支 3）+ 新建 blob（分支 4），缺 direct-write-unused（分支 1）和 chunk 对齐 RMW（分支 2）。
+
+Ceph `_do_write_small`（`BlueStore.cc:14813-15256`）对每个候选 blob 在 do-while 交错循环内按优先级判断 4 个分支:
+
+| 分支 | 行号 | 条件 | 动作 |
+| --- | --- | --- | --- |
+| 1 direct-write-unused | 14963-15009 | chunk 对齐 + ondisk 足够 + is_unused + is_allocated | aio_write 或 deferred（按 prefer_deferred_size）+ calc_csum + mark_used + set_lextent |
+| 2 chunk-aligned RMW | 15023-15091 | chunk 对齐 + is_allocated + head/tail 读回 | 读 head/tail → 拼 → calc_csum → set_lextent → 构造 deferred op |
+| 3 can_reuse_blob | 15094-15140 | blob 有未分配空间可扩展 | punch_hole + 新分配 |
+| 4 新建 blob | 15232-15255 | 都不命中 | new blob + wctx->write |
+
+改动:
+
+1. 在 6.4 的新循环体内，can_reuse_blob 之前，加分支 1 direct-write-unused 判断（参考 Ceph 14963-15009）: 条件 chunk 对齐 + ondisk 足够 + is_unused + is_allocated；命中按 `prefer_deferred_size` 决定 aio_write 或 deferred + calc_csum + mark_used + set_lextent
+
+2. 分支 1 之后加分支 2 chunk-aligned RMW 判断（参考 Ceph 15023-15091）: 读 head/tail（调 `_do_read`）→ 拼 → calc_csum → set_lextent → 构造 deferred op
+
+RMW 边界（`BlueStore.cc:15013-15015`，实现时不能漏）:
+
+```text
+head_read = p2phase(b_off, chunk_size)
+tail_read = p2nphase(b_off + b_len, chunk_size)
+if (head_read || tail_read) &&
+   (ondisk_length >= b_off + b_len + tail_read) &&
+   (head_read + tail_read < min_alloc_size):
+    RMW  // 读 head/tail 拼接
+else:
+    head_read = tail_read = 0  // 放弃 RMW
+```
+
+三条 AND 是 RMW 触发开关: (1) 未完整覆盖 chunk (2) 读回范围落在已分配 ondisk 内 (3) 读回量小于一个 AU。第 3 条是关键: 读回量 >= min_alloc_size 时缺口太大，RMW 不划算，放弃读走 reuse/new。
+
+RCW 澄清: BlueStore 源码无 RCW/reconstruct-write 术语（grep 确认）。BlueStore 是单设备引擎无冗余校验块，没有传统 RAID/EC 语义的 RCW（通过冗余重建避免读旧数据）。BlueStore 的"避免读"机制是 unused bitmap（元数据告知从未写过，无需读）和 chunk 对齐整块覆盖，都是"通过元数据/对齐性知道无需读"，不是"通过冗余重建"。
+
+验证: `tests/bluestore/test_write.cc` 补充: 写零填充 blob（触发 add_unused）→ 后续非零小写触发 direct-write-unused（验证无新 blob）；不对齐小写触发 RMW（验证 head/tail 原数据保留 + deferred op 生成）。
+
+风险: 高。RMW 读回路径调 `_do_read`（当前在 BlueStore，可直接调；若 ReadPipeline 先做要适配）。csum 重算: RMW 读回 head/tail 后 calc_csum 整个 chunk，需确认 calc_csum 接受任意 b_off（当前签名 `calc_csum(b_off, bl, dev_block_size)` 已支持）。
+
+### 6.6 BigDeferredWriteContext + 大写 RMW [ ]
+
+依赖 6.3（is_mutable/is_allocated）。与 6.5 并行（不同函数）。
+
+cxxlab 现状: `_do_write_big`（`bluestore.cc:1713-1805`）无 `BigDeferredWriteContext`，大写中的小覆写无法延迟，整体走 wctx->write 整块写。
+
+Ceph 参考: `BlueStore.h:2268-2288`（BigDeferredWriteContext 结构体）、`BlueStore.cc:15262-15297`（can_defer）、`15299-15316`（apply_defer）、`15318-15379`（_do_write_big_apply_deferred）、`15381-15504`（_do_write_big 集成）。
+
+改动:
+
+| 文件 | 内容 |
+| --- | --- |
+| `bluestore/trans_context.h` | 加 `BigDeferredWriteContext` 结构体: `off`/`b_off`/`used`/`head_read`/`tail_read`/`blob_ref`/`blob_start`/`res_extents` + `blob_aligned_len()`/`can_defer()`/`apply_defer()` |
+| `bluestore/bluestore.cc` | 新增 `_do_write_big_apply_deferred`；`_do_write_big` 集成 can_defer/apply_defer/apply_deferred |
+
+`can_defer` 边界（`BlueStore.cc:15288-15290`）:
+
+```text
+res = blob_aligned_len() < prefer_deferred_size &&
+      blob_aligned_len() <= ondisk &&
+      blob.is_allocated(b_off, blob_aligned_len())
+```
+
+覆写量（blob_aligned_len = used + head_read + tail_read）< prefer_deferred_size 时走 RMW defer（读 head/tail），否则整块覆盖写。
+
+`apply_defer` 语义（`BlueStore.cc:15299-15316`）: 检查覆写是否只破坏 blob 连续性（部分重叠），产出 res_extents；若完全重叠某 pextent 则 fallback 到正常写。
+
+`_do_write_big_apply_deferred`（参考 Ceph 15318-15379）: 读 head/tail（调 `_do_read`）→ 拼 → calc_csum → set_lextent → 构造 deferred op（extents = res_extents）。
+
+验证: `tests/bluestore/test_write.cc` 补充: 大写中小覆写触发 defer（验证 head/tail 保留 + 数据正确 + deferred op 生成）；大写整块覆盖不 defer。
+
+风险: 高。与 6.5 共享 RMW 读回路径和 deferred op 构造逻辑。
+
+### 6.7 zero 检测改 unused 标记 [ ]
+
+依赖 6.5（direct-write-unused 路径已实现，能消费 unused 标记）。
+
+cxxlab 现状: `_do_write_small`（`bluestore.cc:1628-1631`）zero 检测是 `if (bl.is_zero()) punch_hole`。Ceph 在 min_alloc_size != block_size 时标记 unused 而非 punch_hole（参考 `BlueStore.cc:15243` wctx->write 第 6 参数 `min_alloc_size != block_size`）。
+
+改动: zero 检测改为: 若 blob 已分配该 chunk 且 min_alloc_size != block_size，调 `add_unused` 标记而非 punch_hole；让后续小写能走 6.5 的 direct-write-unused 路径。
+
+验证: 写零 → 后续小写能 direct-write-unused（验证 6.5 路径被激活）。
+
+风险: 中。改变 zero 写语义，需核对现有 zero 相关测试（`test_zero_remove_attrs.cc`）期望。
+
+### 6.8 提取 DeferredWriter 模块 [ ]
+
+依赖 6.1（bug 已修）+ 6.5/6.6（deferred op 产生点已稳定）。后置: 6.5/6.6 大量产生 deferred op（direct-write-unused、small RMW、big RMW 都构造 deferred op），先实现再由 DeferredWriter 收敛接口更自然。若模块提取先做，6.5/6.6 要适配新接口；若 6.5/6.6 先做，6.8 提取时收敛更自然。
+
+cxxlab 现状（6.1 修复后）: `_deferred_queue`（`bluestore.cc:1951`）立即 submit 无合并；`_deferred_submit`（`bluestore.cc:1964`）逐 extent aio_write 无 IO 聚合；无 pending/running 分离；kv_sync 无 deferred_done→flush→stable 链路。
+
+Ceph 参考: `BlueStore.h:2069-2095`（DeferredBatch）、`BlueStore.cc:3879-3899`（prepare_write）、`3901-3965`（_discard）、`13860-13903`（_deferred_queue）、`13941-13999`（_deferred_submit_unlock）、`14009-14063`（_deferred_aio_finish）、`13905-13939`（deferred_try_submit）、`13355-13403`（kv_sync flush）、`13607-13623`（kv_finalize deferred_stable）。
 
 新增文件:
 
@@ -963,7 +1159,7 @@ Ceph 参考: `BlueStore.h:2069-2095`（`DeferredBatch`）、`BlueStore.cc:3879-3
 
 `DeferredWriter` 接口（4 方法）:
 
-- `queue(TransContext* txc)`: 获取 OSR 的 deferred_pending（不存在则新建），将 txc 加入 txcs，遍历 deferred ops 调 `prepare_write` 合并到 iomap
+- `queue(TransContext* txc)`: 获取 OSR 的 deferred_pending（不存在则新建），将 txc 加入 txcs，遍历 deferred ops 调 prepare_write 合并到 iomap
 - `try_submit()`: 遍历全局 deferred_queue_osr_，对有 pending 且无 running 的 OSR 调 submit
 - `flush_done()`: AIO 完成回调，清除 deferred_running，batch 加入 deferred_done_queue_
 - `finalize_stable()`: kv_finalize 阶段处理 deferred_stable，对每个 txc 调 `_txc_state_proc`，删 PREFIX_DEFERRED key
@@ -984,170 +1180,63 @@ Ceph 参考: `BlueStore.h:2069-2095`（`DeferredBatch`）、`BlueStore.cc:3879-3
 - `_deferred_submit` 内部: 切换 pending→running，遍历 iomap 合并连续 offset 的 IO 为单个 `aio_write`，最后统一 `aio_submit`
 - `_kv_sync_thread_main` 新增 deferred_done→`bdev->flush()`→deferred_stable 链路
 - `_kv_finalize_thread_main` 新增 deferred_stable 处理: 按 `deferred_batch_ops` 阈值触发 `try_submit`
-- 修复原 `_deferred_aio_finish` 的删 key bug（改为 finalize_stable 阶段删）
-- BlueStore 持有 `std::unique_ptr<DeferredWriter> deferred_writer_`，原 `_deferred_*` 5 个方法 + 4 个成员移除，替换为 4 方法调用
+- BlueStore 持有 `std::unique_ptr<DeferredWriter> deferred_writer_`，原 `_deferred_*` 5 个方法 + 3 个成员移除，替换为 4 方法调用
 
 测试:
 
 - `test_deferred_writer.cc`: 直接构造 DeferredWriter + mock BlockDevice，测 prepare_write 合并/discard 覆盖语义、连续 IO 聚合、pending/running 分离
 - `test_write.cc` Deferred write 测试组 + 新增多 txc 合并提交测试
 
-风险: 高（多线程状态机 + IO 保序）
+风险: 高（多线程状态机 + IO 保序）。
 
-### 6.2 提取 ReadPipeline 模块 [ ]
+### 按需/缓做项
 
-将读路径三阶段流水线 + 数据结构收敛为独立可测模块，替代原 T1 把 4 个 struct + 3 方法加进 BlueStore 成员的方案。
+#### ReadPipeline 模块（原 6.2）[ ]
 
-cxxlab 现状: `_do_read`（`bluestore.cc:1109-1200`）单函数单循环，cache 查询/同步读盘/csum 校验/组装全内联，逐 chunk 同步 `bdev_->read`，无 IO 合并、无 csum 重试。
+benchmark 依赖，当前数据缺位，缓做。功能正确（`_do_read` `bluestore.cc:1109-1200` 已修复排序 bug 和 csum 偏移 bug），纯性能/可测性改进。
 
-Ceph 参考: `BlueStore.cc:11156-11281`（`_do_read` 主控）、`10893-10992`（`_read_cache`）、`10994-11061`（`_prepare_read_ioc`）、`11063-11154`（`_generate_read_result_bl`）。
+若实施: 新增 `bluestore/read_pipeline.h` + `.cc` + test。1 方法接口 `read(OnodeRef, offset, length, BlockDevice*, BufferCache*) → bufferlist`。内部三阶段（`_read_cache` / `_prepare_read_ioc` / `_generate_read_result_bl`）+ csum 重试。前置: 确认 `BlockDevice::aio_read` 可用。
 
-新增文件:
+仅在 benchmark 改进后（增大样本、多次运行、裸设备、预热、开 cache）证明读是瓶颈时推进。
 
-| 文件 | 内容 |
-| --- | --- |
-| `bluestore/read_pipeline.h` | `ReadPipeline` 类 + 内部数据结构（不暴露到 `bluestore.h`） |
-| `bluestore/read_pipeline.cc` | 实现 |
-| `tests/bluestore/test_read_pipeline.cc` | 单元测试（mock BlockDevice + BufferCache，无需 mount） |
+#### TransContext 状态机迁移（原 6.3）[ ]
 
-`ReadPipeline` 接口（1 方法）:
+纯架构，无 bug 无性能问题，缓做。基于源码确认: `STATE_DEFERRED_DONE` 是死状态（grep 确认全代码无 set_state 使用）；`_txc_state_proc` switch 缺 `case STATE_DEFERRED_QUEUED`/`STATE_DEFERRED_DONE`（靠外部 `_deferred_submit`/`_deferred_aio_finish` 推进）；set_state 12 处分散在 8 个函数。
 
-- `read(OnodeRef o, uint64_t offset, uint64_t length, BlockDevice* bdev, BufferCache* cache) → bufferlist`
+若实施: TransContext 新增 `advance(BlueStoreEnv& env)`，内部 11 态转换表；补齐缺失 case，消除死状态；15 个 public 字段逐步 private 化。建议在 6.8 之后做（DeferredWriter 提取已缩小 BlueStore surface）。仅在计划加新状态（compression/clone）时推进。
 
-内部数据结构（`read_pipeline.h` 内，不进 `bluestore.h`）:
+#### can_reuse_blob 对齐移除（原 6.4-B）[ ]
 
-- `region_t` = `{uint64_t logical_offset; uint32_t blob_xoffset; uint32_t length; uint32_t front}`
-- `read_req_t` = `{uint32_t r_off; uint32_t r_len; bufferlist bl; std::vector<region_t> regs}`
-- `regions2read_t` = `std::vector<read_req_t>`
-- `blobs2read_t` = `std::map<BlobRef, regions2read_t>`
-- `ready_regions_t` = `std::map<uint64_t, bufferlist>`
+独立于 6.5，单独评估。`can_reuse_blob`（`blob.cc:86`）的 `new_blen = (new_blen + min_alloc_size - 1) & ~(min_alloc_size - 1)` 是 cxxlab 自己加的（Ceph 无）。但此行是为规避 BitmapAllocator 断言（dev-plan 已完成实现记录: "blob reuse 时 new_alloc_len 未按 min_alloc_size 对齐，导致 BitmapAllocator 断言失败"）。
 
-三阶段实现（ReadPipeline private 方法）:
-
-- `_read_cache(OnodeRef, offset, length, ready_regions, blobs2read)`: 遍历 extent_map，查 BufferCache，命中进 ready_regions，未命中对齐 chunk_size 后合并进 blobs2read
-- `_prepare_read_ioc(blobs2read, ioc)`: 遍历 blobs2read，按 `blob.map()` 映射物理偏移，注册 `aio_read` 到同一 IOContext
-- `_generate_read_result_bl(OnodeRef, offset, length, ready_regions, blobs2read, buffered, csum_error, bl)`: csum 校验、cache 回填、组装结果 + hole 填零
-
-`read()` 主控: 调三阶段 + `aio_submit` + `aio_wait` + csum error 重试（`retry_count` 递增）
-
-其他改动:
-
-- `bdev_->read`（同步）改为 `bdev_->aio_read` + 统一 `aio_submit`（需确认 `BlockDevice` 的 aio_read 接口）
-- BlueStore 的 `read()` 委托给 `read_pipeline_->read(...)`，`_do_read` 从 `bluestore.cc` 移除
-
-前置条件: 确认 `BlockDevice::aio_read` 可用（`blk/` 已有 libaio 支持）
-
-测试:
-
-- `test_read_pipeline.cc`: 直接构造 ReadPipeline + mock BlockDevice，测 cache hit/miss 混合、多 chunk 批量读、csum 重试、hole 填零
-- `test_read.cc`（已有 9 测试）保留作为集成验证
-
-### 6.3 迁移 TransContext 状态机 [ ]
-
-将 11 态状态机从 BlueStore 的 `_txc_state_proc` 迁入 TransContext 自身，使其 own 自己的生命周期。
-
-cxxlab 现状: `TransContext`（`trans_context.h:25-115`）持有 15 个 public 字段 + `state_`（private），但 11 态转换全由 BlueStore 的 `_txc_state_proc`（`bluestore.cc:492-558`）驱动，共 17 个 `txc->set_state()` 调用点分散在 `_txc_state_proc`/`_txc_finish_io`/`_txc_committed_kv`/`_kv_sync` 中。TransContext 不封装自己的转换。
-
-改动文件: `trans_context.h`（TransContext）、`bluestore.cc`（移除 `_txc_state_proc`，17 个 set_state 点收敛）
-
-改动内容:
-
-1. 在 TransContext 新增 `advance(BlueStoreEnv& env)` 方法:
-   - 内部持有 11 态转换表（state × condition → next_state + side_effect）
-   - `BlueStoreEnv` 是一个窄 visitor/callback 接口，提供 BlueStore 的环境能力（`aio_submit`、`kv_sync_queue`、`finisher_queue`、`deferred_writer_queue` 等）
-   - 每次调用 advance 根据当前 state + 条件决定转换 + 触发副作用
-
-2. BlueStore 的 `_txc_state_proc` 改为薄壳: 构造 `BlueStoreEnv` 并调 `txc->advance(env)`
-
-3. 17 个外部 `set_state` 点坍缩为 `advance()` 调用（副作用内聚到 TransContext）
-
-4. TransContext 的 15 个 public 字段逐步 private 化（只暴露 advance 接口 + 必要的查询方法）
-
-测试:
-
-- `test_trans_context.cc`（已有 12 测试）补充: 直接构造 TransContext + mock BlueStoreEnv，测 11 态转换表的每个路径、非法状态拒绝、副作用触发顺序
-
-风险: 高（17 调用点、11 状态、副作用）。建议在 6.1/6.2 之后做——前两次提取已缩小 BlueStore surface，迁移更安全。
-
-### 6.4 blob reuse 交错搜索 + can_reuse_blob 对齐修复 [ ]（独立）
-
-cxxlab 现状: `_do_write_big`（`bluestore.cc:1746-1783`）和 `_do_write_small`（`bluestore.cc:1638-1691`）用 forward 先穷尽、未命中再 backward 的两段式搜索。`can_reuse_blob`（`blob.cc:86`）多了 min_alloc_size 对齐。
-
-Ceph 参考: `BlueStore.cc:15524-15568`（big 双向 do-while）、`14910-15211`（small 双向 do-while）、`2307-2379`（`can_reuse_blob`）。
-
-改动内容:
-
-1. `_do_write_big` 和 `_do_write_small` 的 forward+backward 搜索改为 `do-while` 交错模式: 每轮先查最近的 forward extent 再查最近的 backward extent，任一命中即退出，保证找到物理距离最近的复用 blob
-
-2. 移除 `can_reuse_blob`（`blob.cc:86`）中多余的 `new_blen = (new_blen + min_alloc_size - 1) & ~(min_alloc_size - 1)` 对齐，与 Ceph 保持一致
-
-验证: `tests/bluestore/test_write.cc`（已有 22 测试）补充"前后都有可复用 blob 时选最近"的场景
-
-### 6.5 small write RMW + BigDeferredWriteContext [ ]（依赖 6.4）
-
-cxxlab 现状: `_do_write_small` 仅 `can_reuse_blob` 单一复用路径，无 direct-write-unused、无 chunk 对齐 RMW。`_do_write_big` 无 `BigDeferredWriteContext`，大写中的小覆写无法延迟。
-
-Ceph 参考: `BlueStore.cc:14963-14997`（direct-write-unused）、`15023-15091`（chunk RMW）、`BlueStore.h:2268-2288`（`BigDeferredWriteContext`）、`BlueStore.cc:15262-15316`（`can_defer`/`apply_defer`）、`15318-15379`（`_do_write_big_apply_deferred`）、`15418-15504`（big defer 路径）。
-
-改动内容:
-
-1. `_do_write_small` 补 direct-write-unused 路径: 写落在已分配+unused 的 chunk 对齐区域时直接 `aio_write` 或 deferred（若 `b_len < prefer_deferred_size`）。需确认 `bluestore_blob_t::is_unused()`/`is_allocated()`/`is_unallocated()` 在 `bluestore_types.h` 中是否已实现
-
-2. `_do_write_small` 补 chunk 对齐 RMW 路径: 写落在已分配空间但不对齐 chunk 边界时，先读 head/tail 填充 chunk，再构造 `bluestore_deferred_op_t` 延迟覆写
-
-3. 新增 `BigDeferredWriteContext` 结构体（`trans_context.h`）: 持有 `off`/`b_off`/`used`/`head_read`/`tail_read`/`blob_ref`/`blob_start`/`res_extents`，实现 `can_defer()`/`apply_defer()`
-
-4. 新增 `_do_write_big_apply_deferred` 函数: 执行 RMW（读回 head/tail → 拼接 → `calc_csum` → `set_lextent` → 构造 deferred op）
-
-5. `_do_write_big` 中补 `prefer_deferred_size` RMW 路径: 当 `l <= prefer_deferred_size*2` 时尝试 `can_defer`
-
-验证: `tests/bluestore/test_write.cc` 补充小覆写 RMW + 大写小覆写延迟场景
-
-风险: 高（RMW 逻辑复杂，涉及读回 + csum + deferred op 构造）
-
-### 6.6 property/fuzz 测试 [ ]
-
-| 测试目标 | 内容 | Ceph 参考 |
-| --- | --- | --- |
-| compress_extent_map | 随机生成 extent 序列，验证 compress 后物理连续性（相邻 extent 的 blob 物理偏移连续才可合并） | `BlueStore.cc` ExtentMap::compress_extent_map |
-| punch_hole | 随机 offset+length punch hole，验证结果 extent 列表无重叠、无空洞残留 | `BlueStore.cc` ExtentMap::punch_hole |
-| checksum 偏移 | 随机 blob offset 读，验证 csum 校验的 chunk 对齐与偏移映射正确 | `BlueStore.cc` `_verify_csum` |
-
-测试框架: GoogleTest property-based（或简单 fuzz：随机种子 + N 轮随机操作序列），新增 `tests/bluestore/test_fuzz.cc`。
+不能盲目跟 Ceph 对齐: 必须先查 BitmapAllocator 的对齐断言点，判断是合理防御（非对齐分配破坏位图）还是冗余。若是合理防御则保留并标注差异原因；若可放宽则移除。
 
 ### T7 SharedBlob 间接层 — 跳过
 
 一个 adapter = 假想 seam，无第二用例（clone/snapshot 不存在），高爆破半径（每个 `bc()` 调用点都要改）。跳过直到 clone/snapshot 到来，届时第二用例（跨 cloned onode 共享 blob cache）才能证明 seam 合理。
 
-### 依赖与优先级
-
-```plaintext
-6.1 (DeferredWriter)  ─────── independent
-6.2 (ReadPipeline)    ─────── independent
-6.4 (blob reuse)      ─────── independent
-6.3 (TransContext)    ─────── 6.1, 6.2
-6.5 (write RMW)       ─────── 6.4
-6.6 (fuzz)            ─────── 6.4, 6.5
-```
-
-建议顺序: 6.1 > 6.2 > 6.4 > 6.3 > 6.5 > 6.6。6.1/6.2/6.4 独立且收益明确，先做；6.3 在 6.1/6.2 缩小 surface 后更安全；6.5 依赖 6.4 的 blob reuse 改进；6.6 最后补 fuzz 验证。
-
-验证手段: 5.5 注入点（write/read/kv/device error injection 验证回滚正确）+ 5.3 benchmark 基线对比（写放大 / 读延迟 / IO 合并数改善）。
-
 ### 与原方案的关键变化
 
-| 方面 | 原方案 | 融合后 |
+| 方面 | 原方案 | 重排后 |
 | --- | --- | --- |
-| 6.1 | 拆 8 文件（pass-through） | 提取 DeferredWriter 模块 |
-| read pipeline | BlueStore 成员 + 4 struct 进 bluestore.h | 提取 ReadPipeline 模块（struct 内部化） |
-| deferred | DeferredBatch 作 helper + 5 方法留 BlueStore | 提取 DeferredWriter owning 生命周期 |
-| TransContext | 未涉及 | 新增 6.3 迁移状态机 |
-| blob reuse + write RMW | T2/T3/T4 分散 | 合并为 6.4 + 6.5（原样保留） |
+| 6.1 | 提取 DeferredWriter 模块（捆绑 bug 修复） | 拆分: 6.1 删 key bug 止血（先做）+ 6.8 模块提取（后做） |
+| 6.5 | small write RMW（可选，依赖 6.4） | 提升为必须，拆 6.3/6.4/6.5/6.6/6.7 五步（含 blob 状态模型前置） |
+| 6.4 | blob reuse + 对齐修复（捆绑） | 拆分: 6.4 交错搜索（与 6.5 强耦合，并入）+ 对齐移除（独立评估，缓做） |
+| 6.6 | fuzz（最后） | 提前为 6.2（验证 6.1 修复 + 为 6.5 铺路） |
+| 6.2/6.3 | ReadPipeline/状态机（重构主体） | 降为按需/缓做（benchmark 依赖 + 纯架构） |
 | T7 SharedBlob | 可选实施 | 跳过 |
-| 文件拆分 | 需要单独做 | 随模块提取后自然消解 |
+| 决策依据 | benchmark 驱动 | 正确性 + 代码可审查性 + Ceph 对照（benchmark 低配环境信噪比差） |
+
+### 验证手段
+
+- 6.1 修复后: `test_write.cc` deferred 组 + 新增 WAL key 删除验证
+- 6.5/6.6: `test_write.cc` 新增 direct-write-unused / RMW / big defer 场景
+- 6.2 fuzz: compress_extent_map / punch_hole / csum 偏移随机化测试
+- 5.5 error injection: write/read/kv/device 注入点验证事务回滚正确
+- benchmark（5.3）: 仅作回归对比基线，不作重构决策依据
 
 ---
 
 ## 下一步
 
-阶段一至五全部完成（BlueFS + BlueRocksEnv + Throttle + BlueStore MVP/P1 + BTier + R7 可观测性与运维）。当前进入阶段六重构。起点: 6.1 提取 DeferredWriter 模块。
+阶段一至五全部完成（BlueFS + BlueRocksEnv + Throttle + BlueStore MVP/P1 + BTier + R7 可观测性与运维）。当前进入阶段六重构，按重排后的依赖顺序推进。起点: 6.1 修复 DeferredWriter 删 key bug（止血），随后 6.2 fuzz 验证，再进入 6.3 补全 blob 状态模型为 write RMW（6.5-6.7）铺路。
