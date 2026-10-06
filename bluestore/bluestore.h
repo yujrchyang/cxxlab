@@ -245,9 +245,6 @@ private:
     // Deferred write
     bluestore_deferred_op_t *_get_deferred_op(TransContext *txc, uint64_t len);
     void _deferred_queue(TransContext *txc);
-    void _deferred_submit();
-    void _deferred_aio_finish(TransContext *txc);
-    void _remove_deferred_key(TransContext *txc);
     int _deferred_replay();
     void _deferred_batch_aio_finish(DeferredBatch *b);
 
@@ -326,8 +323,6 @@ private:
 
     // Deferred write queue
     std::atomic<uint64_t> deferred_seq_{0};
-    std::mutex deferred_lock_;
-    std::deque<TransContext *> deferred_queue_;
     std::unique_ptr<DeferredWriter> deferred_writer_;
     std::deque<DeferredBatch *> deferred_stable_to_finalize_;
 

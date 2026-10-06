@@ -480,13 +480,7 @@ void BlueStore::_aio_callback(void *handle, void *priv) {
 
 void BlueStore::txc_aio_finish(void *p) {
     auto *txc = static_cast<TransContext *>(p);
-
-    // Handle deferred write AIO completion
-    if (txc->get_state() == TransContext::STATE_DEFERRED_QUEUED) {
-        _deferred_aio_finish(txc);
-    } else {
-        _txc_state_proc(txc);
-    }
+    _txc_state_proc(txc);
 }
 
 TransContext *BlueStore::_txc_create(Collection *c) {
@@ -2192,60 +2186,6 @@ bluestore_deferred_op_t *BlueStore::_get_deferred_op(TransContext *txc,
 
 void BlueStore::_deferred_queue(TransContext *txc) {
     deferred_writer_->queue(txc);
-}
-
-void BlueStore::_deferred_submit() {
-    std::deque<TransContext *> queue;
-    queue.swap(deferred_queue_);
-
-    for (auto *txc : queue) {
-        auto &wt = *txc->deferred_txn;
-        for (auto &op : wt.ops) {
-            uint64_t data_pos = 0;
-            for (auto &e : op.extents) {
-                if (e.offset == bluestore_pextent_t::INVALID_OFFSET) continue;
-
-                uint64_t write_len =
-                    std::min<uint64_t>(e.length, op.data.length() - data_pos);
-                if (write_len == 0) break;
-
-                bufferlist write_bl;
-                write_bl.substr_of(op.data, data_pos, write_len);
-                if (!should_inject(cfg_.inject_write_err_rate)) {
-                    bdev_->aio_write(e.offset, write_bl, &txc->ioc, false);
-                }
-                data_pos += write_len;
-            }
-        }
-
-        if (txc->ioc.has_pending_aios()) {
-            bdev_->aio_submit(&txc->ioc);
-        } else {
-            bdev_->flush();
-            _remove_deferred_key(txc);
-            txc->set_state(TransContext::STATE_DEFERRED_CLEANUP);
-            _txc_state_proc(txc);
-        }
-    }
-}
-
-void BlueStore::_remove_deferred_key(TransContext *txc) {
-    if (!txc->deferred_txn) {
-        return;
-    }
-    auto it = db_->get_transaction();
-    std::string key;
-    key_encode_u64(txc->deferred_txn->seq, &key);
-    it->rmkey(PREFIX_DEFERRED, key);
-    db_->submit_transaction_sync(it);
-}
-
-void BlueStore::_deferred_aio_finish(TransContext *txc) {
-    bdev_->flush();
-    _remove_deferred_key(txc);
-    _finish_write(txc);
-    txc->set_state(TransContext::STATE_DEFERRED_CLEANUP);
-    _txc_state_proc(txc);
 }
 
 void BlueStore::_deferred_batch_aio_finish(DeferredBatch *b) {
