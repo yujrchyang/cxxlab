@@ -5,11 +5,13 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
+#include <spdlog/spdlog.h>
+
 #include <atomic>
 #include <cerrno>
+#include <cstdlib>
 #include <cstring>
 #include <iomanip>
-#include <iostream>
 #include <sstream>
 
 #include "armor.h"
@@ -49,7 +51,7 @@ namespace TOPNSPC {
 static std::atomic<unsigned> buffer_cached_crc{0};
 static std::atomic<unsigned> buffer_cached_crc_adjusted{0};
 static std::atomic<unsigned> buffer_missed_crc{0};
-static bool buffer_track_crc = false;
+static bool buffer_track_crc = (getenv("CXXLAB_BUFFER_TRACK") != nullptr);
 
 void buffer::track_cached_crc(bool b) {
     buffer_track_crc = b;
@@ -1473,21 +1475,21 @@ int buffer::list::write_file(const char *fn, int mode) {
     int fd = TEMP_FAILURE_RETRY(::open(fn, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode));
     if (fd < 0) {
         int err = errno;
-        std::cerr << "bufferlist::write_file(" << fn << "): failed to open file: "
-                  << cpp_strerror(err) << std::endl;
+        spdlog::error("bufferlist::write_file({}): failed to open file: {}",
+                      fn, cpp_strerror(err));
         return -err;
     }
     int ret = write_fd(fd);
     if (ret) {
-        std::cerr << "bufferlist::write_fd(" << fn << "): write_fd error: "
-                  << cpp_strerror(ret) << std::endl;
+        spdlog::error("bufferlist::write_fd({}): write_fd error: {}",
+                      fn, cpp_strerror(ret));
         VOID_TEMP_FAILURE_RETRY(::close(fd));
         return ret;
     }
     if (TEMP_FAILURE_RETRY(::close(fd))) {
         int err = errno;
-        std::cerr << "bufferlist::write_file(" << fn << "): close error: "
-                  << cpp_strerror(err) << std::endl;
+        spdlog::error("bufferlist::write_file({}): close error: {}",
+                      fn, cpp_strerror(err));
         return -err;
     }
     return 0;
@@ -1642,7 +1644,7 @@ uint32_t buffer::list::crc32c(uint32_t crc) const {
                     crc = ccrc.second;
                     cache_hits++;
                 } else {
-                    crc = ccrc.second ^ calc_crc32(NULL, node.length(), ccrc.first ^ crc);
+                    crc = ccrc.second ^ calc_crc32(NULL, node.length(), ccrc.first ^ crc) ^ calc_crc32(NULL, node.length(), 0);
                     cache_adjusts++;
                 }
             } else {

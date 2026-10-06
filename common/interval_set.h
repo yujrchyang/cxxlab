@@ -4,8 +4,9 @@
 #include <cstdint>
 #include <map>
 
-#include "common_fwd.h"
+#include "cassert.h"
 #include "common/denc.h"
+#include "common_fwd.h"
 
 namespace TOPNSPC {
 
@@ -89,10 +90,12 @@ public:
     void swap(interval_set &o) { m_.swap(o.m_); }
 
     T range_start() const {
-        return m_.empty() ? T(0) : m_.begin()->first;
+        cxxlab_assert(!m_.empty());
+        return m_.begin()->first;
     }
     T range_end() const {
-        return m_.empty() ? T(0) : m_.rbegin()->first + m_.rbegin()->second;
+        cxxlab_assert(!m_.empty());
+        return m_.rbegin()->first + m_.rbegin()->second;
     }
 
     void insert(const interval_set &other) {

@@ -23,8 +23,8 @@ public:
     explicit Throttle(uint64_t max);
     ~Throttle();
 
-    Throttle(const Throttle&) = delete;
-    Throttle& operator=(const Throttle&) = delete;
+    Throttle(const Throttle &) = delete;
+    Throttle &operator=(const Throttle &) = delete;
 
     // 阻塞获取 n 个资源（FIFO 公平排队）
     void get(uint64_t n);

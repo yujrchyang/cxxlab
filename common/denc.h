@@ -45,7 +45,6 @@ inline constexpr bool denc_supported = denc_traits<T>::supported;
 //
 // See src/test/encoding/generate-corpus-objects.sh.
 //
-//#define ENCODE_DUMP_PATH /tmp/something
 
 #ifdef ENCODE_DUMP_PATH
 #include <fcntl.h>

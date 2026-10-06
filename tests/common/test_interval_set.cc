@@ -185,10 +185,10 @@ TEST(IntervalSetTest, EraseNoOverlap) {
     EXPECT_EQ(is.size(), 2u);
 }
 
-TEST(IntervalSetTest, RangeStartEndEmpty) {
+TEST(IntervalSetTest, RangeStartEndEmptyAsserts) {
     interval_set<uint64_t> is;
-    EXPECT_EQ(is.range_start(), 0u);
-    EXPECT_EQ(is.range_end(), 0u);
+    EXPECT_DEATH(is.range_start(), ".*");
+    EXPECT_DEATH(is.range_end(), ".*");
 }
 
 TEST(IntervalSetTest, RangeStartEnd) {

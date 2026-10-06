@@ -4,6 +4,7 @@
 #include <string>
 
 #include "common/buffer.h"
+#include "common/crc32.h"
 
 using namespace TOPNSPC;
 
@@ -370,4 +371,48 @@ TEST(TestBufferList, StaticFromMem) {
     auto bl = buffer::list::static_from_mem(data, strlen(data));
     EXPECT_EQ(strlen(data), bl.length());
     EXPECT_EQ(0, memcmp(data, bl.c_str(), strlen(data)));
+}
+
+TEST(BufferListCrc32c, MultiBufferMatchesSequential) {
+    buffer::list bl;
+    bl.append("hello ", 6);
+    bl.append("world", 5);
+    uint32_t whole = bl.crc32c(0);
+    uint32_t seq = calc_crc32(
+        reinterpret_cast<const uint8_t *>("hello "), 6, 0);
+    seq = calc_crc32(
+        reinterpret_cast<const uint8_t *>("world"), 5, seq);
+    EXPECT_EQ(whole, seq);
+}
+
+TEST(BufferListCrc32c, CacheHitBaseMatch) {
+    buffer::list bl;
+    bl.append("hello ", 6);
+    bl.append("world", 5);
+    uint32_t crc1 = bl.crc32c(0);
+    uint32_t crc2 = bl.crc32c(0);
+    EXPECT_EQ(crc1, crc2);
+}
+
+TEST(BufferListCrc32c, CacheAdjustCorrectness) {
+    buffer::ptr shared("abcdefghij", 10);
+
+    buffer::list bl2;
+    bl2.push_back(shared);
+    uint32_t crc2 = bl2.crc32c(0);
+
+    buffer::list bl1;
+    bl1.append("XX", 2);
+    bl1.push_back(shared);
+    uint32_t crc1 = bl1.crc32c(0);
+
+    uint32_t expect2 = calc_crc32(
+        reinterpret_cast<const uint8_t *>("abcdefghij"), 10, 0);
+    EXPECT_EQ(crc2, expect2);
+
+    uint32_t expect1 = calc_crc32(
+        reinterpret_cast<const uint8_t *>("XX"), 2, 0);
+    expect1 = calc_crc32(
+        reinterpret_cast<const uint8_t *>("abcdefghij"), 10, expect1);
+    EXPECT_EQ(crc1, expect1);
 }

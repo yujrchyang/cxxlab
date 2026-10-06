@@ -1,4 +1,6 @@
+#include <algorithm>
 #include <array>
+#include <climits>
 
 #ifdef HAVE_ISA_L
 extern "C" {
@@ -60,7 +62,19 @@ uint32_t calc_crc32(const uint8_t *data, size_t length, uint32_t previous_crc) {
     }
 
 #ifdef HAVE_ISA_L
-    return ~crc32_iscsi(const_cast<uint8_t *>(data), static_cast<int>(length), ~previous_crc);
+    {
+        uint32_t crc = ~previous_crc;
+        size_t remaining = length;
+        const uint8_t *p = data;
+        while (remaining > 0) {
+            int chunk = static_cast<int>(
+                std::min(remaining, static_cast<size_t>(INT_MAX)));
+            crc = crc32_iscsi(const_cast<uint8_t *>(p), chunk, crc);
+            p += chunk;
+            remaining -= static_cast<size_t>(chunk);
+        }
+        return ~crc;
+    }
 #else
     return crc32c_software_fallback(data, length, previous_crc);
 #endif

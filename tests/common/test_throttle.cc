@@ -369,3 +369,9 @@ TEST(Throttle, PutWakesBlockedRequest) {
     worker.join();
     ASSERT_TRUE(got.load());
 }
+
+TEST(Throttle, PutOverflowAsserts) {
+    Throttle t(100);
+    t.get(50);
+    EXPECT_DEATH(t.put(60), ".*");
+}

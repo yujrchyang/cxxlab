@@ -3,13 +3,17 @@
 
 #include <algorithm>
 
+#include "cassert.h"
 #include "throttle.h"
 
 namespace TOPNSPC {
 
 Throttle::Throttle(uint64_t max) : max_(max) {}
 
-Throttle::~Throttle() = default;
+Throttle::~Throttle() {
+    std::lock_guard<std::mutex> lock(lock_);
+    cxxlab_assert(conds_.empty());
+}
 
 bool Throttle::should_wait(uint64_t n) const {
     uint64_t m = max_.load(std::memory_order_relaxed);
@@ -17,8 +21,8 @@ bool Throttle::should_wait(uint64_t n) const {
     // 正常请求：获取后会超限则等待
     // 超大请求：仅在已超限时等待（防止死锁）
     return m &&
-           ((n <= m && cur + n > m) ||
-            (n >= m && cur > m));
+        ((n <= m && cur + n > m) ||
+         (n >= m && cur > m));
 }
 
 void Throttle::get(uint64_t n) {
@@ -102,6 +106,8 @@ uint64_t Throttle::take(uint64_t n) {
 
 void Throttle::put(uint64_t n) {
     std::lock_guard<std::mutex> lock(lock_);
+    uint64_t cur = count_.load(std::memory_order_relaxed);
+    cxxlab_assert(cur >= n);
     count_.fetch_sub(n, std::memory_order_relaxed);
     // 只唤醒队首等待者
     if (!conds_.empty()) {
@@ -118,7 +124,7 @@ void Throttle::reset() {
     std::lock_guard<std::mutex> lock(lock_);
     count_.store(0, std::memory_order_relaxed);
     // 唤醒所有等待者
-    for (auto& cv : conds_) {
+    for (auto &cv : conds_) {
         cv.notify_all();
     }
 }
