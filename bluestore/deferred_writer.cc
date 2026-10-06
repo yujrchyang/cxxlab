@@ -142,13 +142,43 @@ void DeferredWriter::try_submit() {
 
 void DeferredWriter::flush_done(DeferredBatch *b) {
     auto *osr = b->osr;
+    bool has_pending = false;
     if (osr) {
         std::lock_guard<std::mutex> l(osr->deferred_lock);
         cxxlab_assert(osr->deferred_running == b);
         osr->deferred_running = nullptr;
+        has_pending = (osr->deferred_pending != nullptr);
     }
+    {
+        std::lock_guard<std::mutex> l(lock_);
+        deferred_done_queue_.push_back(b);
+        if (has_pending && osr) {
+            deferred_queue_.push_back(osr);
+        }
+    }
+    if (has_pending) {
+        try_submit();
+    }
+}
+
+void DeferredWriter::flush_done_to_stable() {
     std::lock_guard<std::mutex> l(lock_);
-    deferred_done_queue_.push_back(b);
+    deferred_stable_queue_.insert(deferred_stable_queue_.end(),
+                                  deferred_done_queue_.begin(),
+                                  deferred_done_queue_.end());
+    deferred_done_queue_.clear();
+}
+
+std::deque<DeferredBatch *> DeferredWriter::swap_stable_queue() {
+    std::lock_guard<std::mutex> l(lock_);
+    std::deque<DeferredBatch *> out;
+    out.swap(deferred_stable_queue_);
+    return out;
+}
+
+bool DeferredWriter::has_done() {
+    std::lock_guard<std::mutex> l(lock_);
+    return !deferred_done_queue_.empty();
 }
 
 }  // namespace TOPNSPC

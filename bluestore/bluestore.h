@@ -329,6 +329,7 @@ private:
     std::mutex deferred_lock_;
     std::deque<TransContext *> deferred_queue_;
     std::unique_ptr<DeferredWriter> deferred_writer_;
+    std::deque<DeferredBatch *> deferred_stable_to_finalize_;
 
     std::thread finisher_thread_;
     std::mutex finisher_lock_;

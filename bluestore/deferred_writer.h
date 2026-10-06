@@ -42,10 +42,14 @@ public:
     void queue(TransContext *txc);
     void try_submit();
     void flush_done(DeferredBatch *b);
+    void flush_done_to_stable();
+    std::deque<DeferredBatch *> swap_stable_queue();
+    bool has_done();
 
     std::mutex lock_;
     std::deque<OpSequencer *> deferred_queue_;
     std::deque<DeferredBatch *> deferred_done_queue_;
+    std::deque<DeferredBatch *> deferred_stable_queue_;
 
 private:
     BlockDevice *bdev_;

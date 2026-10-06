@@ -888,11 +888,13 @@ void BlueStore::_kv_stop() {
 void BlueStore::_kv_sync_thread_main() {
     std::unique_lock<std::mutex> lk(kv_lock_);
     while (true) {
-        while (kv_queue_.empty() && !kv_stop_) {
+        while (kv_queue_.empty() && !deferred_writer_->has_done() &&
+               !kv_stop_) {
             kv_sync_in_progress_ = false;
             kv_cond_.wait(lk);
         }
-        if (kv_stop_ && kv_queue_.empty()) break;
+        if (kv_stop_ && kv_queue_.empty() && !deferred_writer_->has_done())
+            break;
 
         std::deque<TransContext *> committing;
         committing.swap(kv_queue_);
@@ -915,10 +917,21 @@ void BlueStore::_kv_sync_thread_main() {
             bdev_->flush();
         }
 
+        deferred_writer_->try_submit();
+        deferred_writer_->flush_done_to_stable();
+        auto deferred_stable = deferred_writer_->swap_stable_queue();
+
         auto after_flush = std::chrono::steady_clock::now();
 
         {
             auto synct = db_->get_transaction();
+            for (auto *b : deferred_stable) {
+                for (auto *txc : b->txcs) {
+                    std::string key;
+                    key_encode_u64(txc->deferred_txn->seq, &key);
+                    synct->rmkey(PREFIX_DEFERRED, key);
+                }
+            }
             if (!should_inject(cfg_.inject_kv_err_rate)) {
                 db_->submit_transaction_sync(synct);
             }
@@ -946,6 +959,9 @@ void BlueStore::_kv_sync_thread_main() {
             for (auto *txc : committing) {
                 kv_committing_to_finalize_.push_back(txc);
             }
+            deferred_stable_to_finalize_.insert(
+                deferred_stable_to_finalize_.end(), deferred_stable.begin(),
+                deferred_stable.end());
             if (!kv_finalize_in_progress_) {
                 kv_finalize_in_progress_ = true;
                 kv_finalize_cond_.notify_one();
@@ -960,14 +976,19 @@ void BlueStore::_kv_sync_thread_main() {
 void BlueStore::_kv_finalize_thread_main() {
     std::unique_lock<std::mutex> lk(kv_finalize_lock_);
     while (true) {
-        while (kv_committing_to_finalize_.empty() && !kv_finalize_stop_) {
+        while (kv_committing_to_finalize_.empty() &&
+               deferred_stable_to_finalize_.empty() && !kv_finalize_stop_) {
             kv_finalize_in_progress_ = false;
             kv_finalize_cond_.wait(lk);
         }
-        if (kv_finalize_stop_ && kv_committing_to_finalize_.empty()) break;
+        if (kv_finalize_stop_ && kv_committing_to_finalize_.empty() &&
+            deferred_stable_to_finalize_.empty())
+            break;
 
         std::deque<TransContext *> committed;
         committed.swap(kv_committing_to_finalize_);
+        std::deque<DeferredBatch *> deferred_stable;
+        deferred_stable.swap(deferred_stable_to_finalize_);
 
         lk.unlock();
 
@@ -975,6 +996,18 @@ void BlueStore::_kv_finalize_thread_main() {
 
         for (auto *txc : committed) {
             _txc_state_proc(txc);
+        }
+
+        for (auto *b : deferred_stable) {
+            auto it = b->txcs.begin();
+            while (it != b->txcs.end()) {
+                TransContext *txc = *it;
+                it = b->txcs.erase(it);
+                _finish_write(txc);
+                txc->set_state(TransContext::STATE_DEFERRED_CLEANUP);
+                _txc_state_proc(txc);
+            }
+            delete b;
         }
 
         _refresh_perf_counters();
@@ -2158,11 +2191,7 @@ bluestore_deferred_op_t *BlueStore::_get_deferred_op(TransContext *txc,
 }
 
 void BlueStore::_deferred_queue(TransContext *txc) {
-    std::lock_guard<std::mutex> l(deferred_lock_);
-    deferred_queue_.push_back(txc);
-
-    // Submit immediately (simplified approach)
-    _deferred_submit();
+    deferred_writer_->queue(txc);
 }
 
 void BlueStore::_deferred_submit() {
@@ -2221,6 +2250,11 @@ void BlueStore::_deferred_aio_finish(TransContext *txc) {
 
 void BlueStore::_deferred_batch_aio_finish(DeferredBatch *b) {
     deferred_writer_->flush_done(b);
+    std::lock_guard<std::mutex> lg(kv_lock_);
+    if (!kv_sync_in_progress_) {
+        kv_sync_in_progress_ = true;
+        kv_cond_.notify_one();
+    }
 }
 
 int BlueStore::_deferred_replay() {
