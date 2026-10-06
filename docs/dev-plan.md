@@ -1237,6 +1237,208 @@ Ceph 参考: `BlueStore.h:2069-2095`（DeferredBatch）、`BlueStore.cc:3879-389
 
 ---
 
+## 阶段七：Ceph 源码对比验证 [ ]
+
+> 目标：以模块为单位，将 cxxlab 实现与 Ceph 参考源码（`/home/yujrchyang/opensrc/ceph/`）逐项对比，确认实现无遗漏、无偏差。
+> 前置条件：阶段一至六功能实现完成，进入对比验证阶段。
+
+### 对比原则
+
+- 以模块为单位，按依赖顺序自底向上对比（被依赖的模块先验证，避免上层问题根因误判在下层）
+- 每模块产出一份差异报告：接口完整性 / 数据结构 / 核心逻辑 / 边界条件 / 遗漏项
+- 已知简化项（dev-plan 各阶段标注的"简化实现"）标为有意裁剪，不视为遗漏
+- 无 Ceph 对应的模块（`btier/`、`bluestore/error_injector`）不纳入逐行对比，仅做设计合理性备注
+
+### 对比顺序与文件对应
+
+#### 7.1 common/（基础库，无依赖）
+
+| cxxlab | Ceph 参考 | 对比重点 |
+| --- | --- | --- |
+| `buffer.h`、`buffer.cc` | `src/common/buffer.cc` + `src/include/buffer.h` | ptr/node/RAW 模式、append/copy、rebuild、share、zero_fill |
+| `buffer_fwd.h` | `src/include/buffer_fwd.h` | 前向声明集合 |
+| `denc.h` | `src/include/denc.h` | DENC/encode/decode/bound_encode traits、struct_v 版本兼容 |
+| `crc32.h`、`crc32.cc` | `src/common/crc32c.cc` + `crc32c_*.c` | calc_crc32 算法、SIMD/ISA-L 路径 |
+| `throttle.h`、`throttle.cc` | `src/common/Throttle.h`、`Throttle.cc` | get/put/take、FIFO 公平、超时、reset_max |
+| `armor.h`、`armor.cc` | `src/common/armor.c`、`armor.h` | base64 armor encode/decode |
+| `formatter.h`、`formatter.cc` | `src/common/Formatter.h`、`Formatter.cc` | JSON Formatter 接口 |
+| `safe_io.h`、`safe_io.cc` | `src/common/safe_io.c`、`safe_io.h` | read/write/recv/send 全量重试 |
+| `interval_set.h` | `src/include/interval_set.h` | insert/erase/find/intersect/union/subset |
+| `object.h`、`object.cc` | `src/common/hobject.h`、`hobject.cc` | ghobject_t 编码/比较 |
+| `error.h`、`error.cc` | `src/common/errno.h`、`errno.cc` | 错误码封装 |
+| `cassert.h`、`cassert.cc` | `src/common/assert.cc`、`assert.h` | ceph_assert/abort |
+| `perf_counter.h`、`perf_counter.cc` | `src/common/perf_counters.h`、`perf_counters.cc` | 计数器 API |
+| `logger.h`、`logger.cc` | `src/common/dout.h` 等 | 日志接口 |
+| `common_fwd.h` | namespace 机制 | TOPNSPC |
+| `convenience.h` | `src/common/convenience.h` | 便捷工具 |
+| `spinlock.h`/`spinlock.cc`、`cpu.h`/`cpu.cc`、`page.h`、`deleter.h`、`likely.h`、`inline_memory.h`、`intarith.h`、`byteorder.h`、`scope_guard.h`、`stack_string_stream.h`、`valgrind.h`、`uuid.h` | common/ 同名/相关 | 工具类逐一核对 |
+
+#### 7.2 blk/（块设备 + 分配器，依赖 common）
+
+| cxxlab | Ceph 参考 | 对比重点 |
+| --- | --- | --- |
+| `allocator.h`、`allocator.cc` | `src/os/bluestore/Allocator.h`、`Allocator.cc` | 抽象接口、create 工厂、init_add_free/allocate/release |
+| `avl_allocator.h`、`avl_allocator.cc` | `src/os/bluestore/AvlAllocator.h`、`AvlAllocator.cc` | range_seg_tree_t、_spillover_range、exact match |
+| `bitmap_allocator.h`、`bitmap_allocator.cc` | `src/os/bluestore/BitmapAllocator.h` + `fastbmap_allocator_impl.*` + `simple_bitmap.*` | L0/L1/L2、Pimpl、arena 轮转 |
+| `hybrid_allocator.h`、`hybrid_allocator.cc` | `src/os/bluestore/HybridAllocator.h`、`HybridAllocator.cc` | _add_to_tree claim-free、AVL→bitmap 回退 |
+| `block_device.h`、`block_device.cc` | `src/blk/BlockDevice.h`、`BlockDevice.cc` | 接口、aio_cb、read/write/discard/flush |
+| `kernel_device.h`、`kernel_device.cc` | `src/blk/kernel/KernelDevice.h`、`KernelDevice.cc` | AIO 提交/收割、buffered/direct、ioctl、discard |
+| `aio.h`/`aio.cc`、`io_context.h`/`io_context.cc` | `src/os/bluestore/` 中 aio 相关 | aio_t、aio_queue、完成回调 |
+| `extent_types.h` | `bluestore_types.h` 中 pextent_t | pextent_t/PExtVector |
+
+#### 7.3 kv/（KV 抽象层，依赖 common）
+
+| cxxlab | Ceph 参考 | 对比重点 |
+| --- | --- | --- |
+| `key_value_db.h`、`key_value_db.cc` | `src/kv/KeyValueDB.h`、`KeyValueDB.cc` | TransactionImpl/IteratorImpl/WholeSpace/PrefixIterator、bounds、encode_key |
+| `rocksdb/rocksdb_store.h`、`rocksdb_store.cc` | `src/kv/RocksDBStore.h`、`RocksDBStore.cc` | WriteBatch、MergeOperator 适配、DeleteRange 阈值、compact、repair、open_read_only |
+| `mem/mem_db.h`、`mem_db.cc` | `src/kv/MemDB.h`、`MemDB.cc` | seqno 快照、iterator 失效、rm_range |
+| `merge_op/` | `src/kv/RocksDBStore.cc` 内 merge | MergeOperator 抽象 + Int64Array/Xor |
+
+#### 7.4 bluefs/（BlueFS，依赖 common + blk）
+
+| cxxlab | Ceph 参考 | 对比重点 |
+| --- | --- | --- |
+| `bluefs_types.h`、`bluefs_types.cc` | `src/os/bluestore/bluefs_types.h`、`bluefs_types.cc` | super/fnode/transaction/extent、make_delta、DENC |
+| `bluefs.h`、`bluefs.cc` | `src/os/bluestore/BlueFS.h`、`BlueFS.cc` | mkfs/mount/umount、_replay、_flush_F/_flush_data、_allocate、_compact_log_async、文件生命周期 |
+| `bluefs_config.h`、`bluefs_config.cc` | BlueFSConfig（BlueFS.h 内） | 配置项默认值 |
+| `bluefs_volume_selector.h`、`bluefs_volume_selector.cc` | `src/os/bluestore/BlueFS.h` 内 VolumeSelector | select_prefer_bdev 回退链 |
+
+#### 7.5 bluestore/（BlueStore 引擎，依赖 common + kv + blk + bluefs）
+
+| cxxlab | Ceph 参考 | 对比重点 |
+| --- | --- | --- |
+| `bluestore_types.h`、`bluestore_types.cc` | `src/os/bluestore/bluestore_types.h`、`bluestore_types.cc` | blob/onode/cnode/pextent、calc_csum/verify_csum、map/split/allocated |
+| `bluestore_constants.h` | `src/os/bluestore/bluestore_common.h` | 前缀常量、枚举 |
+| `bluestore_config.h` | `src/os/bluestore/BlueStore.h` 配置 | 配置项默认值 |
+| `freelist_manager.h`、`freelist_manager.cc` | `src/os/bluestore/FreelistManager.h`、`FreelistManager.cc` | 抽象接口 |
+| `bitmap_freelist_manager.h`、`bitmap_freelist_manager.cc` | `src/os/bluestore/BitmapFreelistManager.h`、`BitmapFreelistManager.cc` | key 编码、init_rm_free、allocate/release |
+| `blue_rocks_env.h`、`blue_rocks_env.cc` | `src/os/bluestore/BlueRocksEnv.h`、`BlueRocksEnv.cc` | Sequential/Random/Writable、目录操作、绝对路径逃逸 |
+| `blob.h`、`blob.cc` | `src/os/bluestore/BlueStore.cc` 中 Blob | ref 追踪、used_in_blob、split |
+| `extent_map.h`、`extent_map.cc` | `src/os/bluestore/BlueStore.cc` 中 ExtentMap | Extent、seek_lextent、punch_hole、compress、reshard |
+| `onode.h`、`onode.cc` | `src/os/bluestore/BlueStore.cc` 中 Onode | encode/decode、attrs、set/remove_attr |
+| `collection.h`、`collection.cc` | `src/os/bluestore/BlueStore.cc` 中 Collection | OnodeSpace、LRU、OpSequencer 反向指针 |
+| `trans_context.h` | `src/os/bluestore/BlueStore.cc` 中 TransContext | 11 态状态机、WriteContext、BlueStoreTransaction |
+| `buffer_cache.h`、`buffer_cache.cc` | `src/os/bluestore/BlueStore.cc` 中 BufferSpace/BufferCache | chunk 级、WRITING/CLEAN、LRU trim |
+| `deferred_writer.h`、`deferred_writer.cc` | `src/os/bluestore/BlueStore.cc` 中 DeferredProcessor/DeferredBatch | iomap 合并、WAL |
+| `bluestore.h`、`bluestore.cc` | `src/os/bluestore/BlueStore.h`、`BlueStore.cc` | mkfs/mount、_do_write_small/big、_do_read、_do_zero/remove、_txc 状态机、kv_sync/finalize 线程、collection_list、omap、fsck、_buffer_cache_write/_finish_write |
+| `error_injector.h`、`error_injector.cc` | 无 Ceph 对应 | 仅备注：cxxlab 独有，跳过 |
+
+#### 7.6 btier/（独立分层存储引擎，无 Ceph 对应）
+
+仅做设计合理性备注，不纳入逐行对比。参照 `docs/design/btier.md` 与实现一致性自检（非 Ceph 对比范围）。
+
+### 审查规则
+
+> 交互约束：只读诊断，严禁直接修改或重写现有代码；所有问题等待逐一确认后由用户手动或授权处理。审查者可执行只读命令（cmake build / ctest / clang-format --dry-run / grep TODO）辅助判断，不得改动源码。
+
+#### 审查范围与抽样
+
+- 按 7.1–7.6 模块顺序，每模块产出一份报告
+- 高危项全量审查，低危项抽样（每模块抽 30% 文件或关键路径文件）
+- 全量审查对象：所有 public 接口、所有并发/锁路径、所有错误回收分支、所有序列化/编码点
+
+#### 严重度定义
+
+- 高危：数据损坏、死锁、UAF/悬垂指针、资源/内存泄漏、序列化不兼容、校验和错误
+- 中危：错误路径资源未回收、状态机不一致、接口契约违反、日志泄露用户数据
+- 低危：代码风格、冗余逻辑、可维护性、命名/注释
+
+#### 问题条目格式
+
+每条问题统一格式：
+
+```text
+模块:文件:行号 | 严重度 | 问题描述 | 根因 | 修复方向 | 回归测试设计
+```
+
+高危项必须附"最小修复方向 + 回归测试设计"，低危项可省略回归测试设计。
+
+#### 维度一：设计符合度与简化项评估
+
+- 确认功能实现完整性，是否存在功能遗漏或过度设计
+- "过度设计"判定基准：Ceph 无等价机制 + 无第二用例（clone/snapshot 等未实现场景）→ 标记为疑似过度设计，由用户确认
+- 逐项列出相比 Ceph 删减/简化的机制（锁粒度、mempool/零拷贝、异步机制、异常处理等），每项说明潜在副作用，由用户确认是否需要
+- 兼容性硬指标单列验证（不并入主观判断）：
+  - key 编码：`prefix + '\0' + inner_key` 字节序与 Ceph 一致
+  - DENC struct_v 版本号与 Ceph 对齐
+  - CRC32C 多项式 0x82F63B78（Castagnoli）
+  - 序列化字段顺序与 Ceph decode 兼容
+
+#### 维度二：代码正确性与边界安全
+
+- 核心逻辑正确性、错误码传播链（构造→返回→调用方处理，按 errno 语义非 RAII 异常安全等级）
+- 锁顺序/死锁独立审查：列出每模块锁获取顺序，核对是否存在逆序/嵌套导致死锁
+- 状态机完整性：TransContext 11 态逐态核对可达性/终止性/不可达态/死状态
+- 引用计数与指针生命周期：raw new/delete、shared_ptr、unique_ptr 全量查；裸指针跨模块传递的所有权归属
+- 幂等性：仅查"应当幂等却不幂等"的接口（umount/close/_txc_finish 重复调用），不要求 allocate 等本就不该幂等的接口幂等
+- 边界条件：空输入、越界、重入、资源耗尽
+- 容错：分配失败/IO 错误分支的资源回收与状态机回滚完备性
+- 隐患按高危/中危/低危标注，附行号与诊断建议
+
+#### 维度三：测试真实性与伪通过检查
+
+重点排查为"让测试通过"的掩盖行为：
+
+- 断言弱化：EXPECT_EQ→EXPECT_NE、ASSERT_*→EXPECT_*、容差过大、断言被注释
+- 硬编码期望值：区分语义常量（合理）与实现耦合魔数（掩盖）
+- 测试绕过被测路径：mock 掉真实 IO 后断言通过但真实路径未覆盖
+- 测试专用分支改变生产行为：`#ifdef TEST` / 测试 hook 修改生产逻辑
+- 期望值与实现同源：用被测函数生成期望值再断言被测函数，等于自证
+
+#### 维度四：测试用例完整性与数据一致性
+
+- 主流程/边界/异常分支/并发覆盖
+- 数据一致性（重点）：
+  - 完整数据块 100% 字节级比对
+  - 随机 Offset/Length 局部读取切片比对
+  - 结构性边界覆盖：跨 chunk / extent / blob / AU 边界（随机抽样会漏，必须显式构造）
+  - bufferlist share/rebuild 前后指针独立性 + 写穿透验证（防 share 未拷贝）
+- 并发测试覆盖目标：明确共享状态、锁、竞争窗口
+- 资源清理：临时文件/目录/shm/socket 在 TearDown + 异常退出时清理（RAII）
+- 状态隔离：全局/静态单例（PerfCounters、BufferCache）跨用例状态污染检查
+- 缺失用例补充：按高危项数量决定，每模块至少提供关键缺失用例的设计思路（含可编译的接口签名伪代码）
+
+#### 维度五：代码质量、调试遗留与规范
+
+- 调试遗留：临时 printf/std::cout、注释掉的代码块、硬编码本地路径、TODO/FIXME/XXX/HACK 统计（grep 工具化）
+- 代码冗余：重复逻辑、冗余辅助函数、未使用头文件/定义（include-what-you-use 工具化）
+- 日志：级别合理、错误日志含足够上下文、敏感信息泄露类型清单（密钥/路径/用户数据原文 dump）
+- 代码格式：`clang-format --dry-run -Werror` 工具化验证，非人眼
+- 魔法数字/硬编码 offset：应有命名常量
+
+#### 跨维度约束
+
+- 性能/复杂度审查（不属维度五规范）：明显 O(n²)、无意义深拷贝、锁粒度过粗
+- 跨模块接口契约一致性：调用点契约（`Allocator::create` 返回值处理、`bufferlist` 跨模块语义）是否一致
+- 修复建议可执行性：高危项附最小修复方向 + 回归测试设计
+- 抽样工具化：高危项全量，低危项抽样 30% 或关键路径文件
+
+### 依赖图
+
+```plaintext
+阶段七: Ceph 源码对比验证
+
+  7.1 common    ─── 无依赖
+  7.2 blk       ─── 7.1 common
+  7.3 kv        ─── 7.1 common（与 7.2 并行）
+  7.4 bluefs    ─── 7.1 + 7.2
+  7.5 bluestore ─── 7.1 + 7.2 + 7.3 + 7.4
+  7.6 btier     ─── 无 Ceph 对应（跳过逐行对比）
+```
+
+### 执行方式
+
+- 每步用 task 子代理并行读取 cxxlab 文件 + Ceph 对应文件，逐项核对
+- 每步产出一份差异清单（表格），标注：一致 / 有意裁剪 / 遗漏 / 偏差（需修复）
+- 完成一步后暂停，报告差异，再进入下一步
+
+### 产出
+
+6 份模块差异报告 + 1 份总结（遗漏项汇总 + 修复优先级建议）。
+
+---
+
 ## 下一步
 
-阶段一至六全部完成（BlueFS + BlueRocksEnv + Throttle + BlueStore MVP/P1 + BTier + R7 可观测性与运维 + 阶段六重构 6.1-6.8）。阶段六主步骤: 6.1 deferred WAL key 止血 + 6.2 fuzz 基线 + 6.3 blob 状态模型 + 6.4 交错搜索 + 6.5 small write direct-write-unused/RMW + 6.6 big write deferred RMW + 6.7 zero→unused 标记 + 6.8 DeferredWriter 模块提取。缓做项: ReadPipeline（收益有限 + benchmark 无法验证）、TransContext 状态机（纯架构 + 近期无加状态）、can_reuse_blob 对齐移除（保留，合理防御）。缓做项触发条件: benchmark 改进后证明瓶颈、计划加新状态（compression/clone）。
+阶段一至六功能实现全部完成。阶段七 Ceph 源码对比验证（7.1-7.6）待执行，按 common → blk → kv → bluefs → bluestore 顺序逐模块对比。缓做项: ReadPipeline、TransContext 状态机、can_reuse_blob 对齐移除（保留，合理防御）。
