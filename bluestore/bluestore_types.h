@@ -7,7 +7,9 @@
 
 #include "blk/extent_types.h"
 #include "common/buffer.h"
+#include "common/cassert.h"
 #include "common/denc.h"
+#include "common/intarith.h"
 #include "common/interval_set.h"
 #include "common/uuid.h"
 
@@ -194,6 +196,9 @@ public:
     uint8_t csum_chunk_order = 0;
     buffer::ptr csum_data;
 
+    typedef uint16_t unused_t;
+    unused_t unused = 0;
+
     bluestore_blob_t() = default;
     bluestore_blob_t(const bluestore_blob_t &) = default;
     bluestore_blob_t(bluestore_blob_t &&) = default;
@@ -241,7 +246,7 @@ public:
     }
 
     bool is_mutable() const {
-        return !has_flag(FLAG_HAS_UNUSED);
+        return true;
     }
 
     bool can_split() const {
@@ -273,6 +278,78 @@ public:
             }
         }
         return true;
+    }
+
+    bool is_allocated(uint64_t b_off, uint64_t b_len) const {
+        if (b_off + b_len > logical_length) {
+            return false;
+        }
+        uint64_t extent_off = 0;
+        for (const auto &e : extents) {
+            uint64_t extent_end = extent_off + e.length;
+
+            if (b_off < extent_end && b_off + b_len > extent_off) {
+                if (!e.is_valid()) {
+                    return false;
+                }
+            }
+
+            extent_off = extent_end;
+            if (extent_off >= b_off + b_len) {
+                break;
+            }
+        }
+        return true;
+    }
+
+    bool is_unused(uint64_t offset, uint64_t length) const {
+        if (!has_unused()) {
+            return false;
+        }
+        uint64_t blob_len = get_logical_length();
+        cxxlab_assert(blob_len % (sizeof(unused_t) * 8) == 0);
+        cxxlab_assert(offset + length <= blob_len);
+        uint64_t chunk_size = blob_len / (sizeof(unused_t) * 8);
+        uint64_t start = offset / chunk_size;
+        uint64_t end = round_up_to(offset + length, chunk_size) / chunk_size;
+        auto i = start;
+        while (i < end && (unused & (1u << i))) {
+            i++;
+        }
+        return i >= end;
+    }
+
+    void add_unused(uint64_t offset, uint64_t length) {
+        uint64_t blob_len = get_logical_length();
+        cxxlab_assert(blob_len % (sizeof(unused_t) * 8) == 0);
+        cxxlab_assert(offset + length <= blob_len);
+        uint64_t chunk_size = blob_len / (sizeof(unused_t) * 8);
+        uint64_t start = round_up_to(offset, chunk_size) / chunk_size;
+        uint64_t end = (offset + length) / chunk_size;
+        for (auto i = start; i < end; ++i) {
+            unused |= (1u << i);
+        }
+        if (start != end) {
+            set_flag(FLAG_HAS_UNUSED);
+        }
+    }
+
+    void mark_used(uint64_t offset, uint64_t length) {
+        if (!has_unused()) {
+            return;
+        }
+        uint64_t blob_len = get_logical_length();
+        cxxlab_assert(blob_len % (sizeof(unused_t) * 8) == 0);
+        cxxlab_assert(offset + length <= blob_len);
+        uint64_t chunk_size = blob_len / (sizeof(unused_t) * 8);
+        uint64_t start = offset / chunk_size;
+        uint64_t end = round_up_to(offset + length, chunk_size) / chunk_size;
+        for (auto i = start; i < end; ++i) {
+            unused &= ~(1u << i);
+        }
+        if (unused == 0) {
+            clear_flag(FLAG_HAS_UNUSED);
+        }
     }
 
     void add_tail(uint32_t new_len) {
@@ -310,7 +387,7 @@ public:
     friend std::enable_if_t<std::is_same_v<bluestore_blob_t,
                                            std::remove_const_t<T>>>
     _denc_friend(T &v, P &p) {
-        DENC_START(1, 1, p);
+        DENC_START(2, 2, p);
         denc(v.extents, p);
         denc(v.logical_length, p);
         denc(v.flags, p);
@@ -318,6 +395,9 @@ public:
             denc(v.csum_type, p);
             denc(v.csum_chunk_order, p);
             denc(v.csum_data, p);
+        }
+        if (v.has_unused()) {
+            denc(v.unused, p);
         }
         DENC_FINISH(p);
     }

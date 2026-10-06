@@ -578,3 +578,70 @@ TEST(ChecksumType, ValueSize) {
     EXPECT_EQ(csum_value_size(CSUM_XXHASH32), 4U);
     EXPECT_EQ(csum_value_size(CSUM_XXHASH64), 8U);
 }
+
+TEST(BluestoreBlob, DencRoundtripWithUnused) {
+    bluestore_blob_t blob;
+    blob.add_tail(0x4000);
+    blob.dirty_extents().clear();
+    blob.dirty_extents().emplace_back(0x10000, 0x4000);
+    blob.init_csum(CSUM_CRC32C, 12, 0x4000);
+    blob.add_unused(0, 0x4000);
+
+    bufferlist bl;
+    encode(blob, bl);
+    auto p = bl.cbegin();
+    bluestore_blob_t blob2;
+    decode(blob2, p);
+
+    EXPECT_EQ(blob2.get_logical_length(), 0x4000u);
+    EXPECT_EQ(blob2.flags, blob.flags);
+    EXPECT_TRUE(blob2.has_csum());
+    EXPECT_TRUE(blob2.has_unused());
+    EXPECT_EQ(blob2.unused, blob.unused);
+    EXPECT_EQ(blob2.get_extents().size(), 1u);
+    EXPECT_EQ(blob2.get_extents()[0].offset, 0x10000ULL);
+    EXPECT_EQ(blob2.get_extents()[0].length, 0x4000u);
+}
+
+TEST(BluestoreBlob, UnusedBitmap) {
+    bluestore_blob_t blob;
+    uint32_t blob_len = 0x10000;
+    blob.add_tail(blob_len);
+    blob.dirty_extents().clear();
+    blob.dirty_extents().emplace_back(0, blob_len);
+
+    EXPECT_FALSE(blob.has_unused());
+    EXPECT_FALSE(blob.is_unused(0, blob_len));
+
+    uint32_t chunk_size = blob_len / 16;
+    blob.add_unused(0, chunk_size * 2);
+    EXPECT_TRUE(blob.has_unused());
+    EXPECT_TRUE(blob.is_unused(0, chunk_size * 2));
+    EXPECT_FALSE(blob.is_unused(0, chunk_size * 3));
+
+    blob.mark_used(0, chunk_size);
+    EXPECT_FALSE(blob.is_unused(0, chunk_size * 2));
+    EXPECT_TRUE(blob.has_unused());
+
+    blob.mark_used(0, blob_len);
+    EXPECT_FALSE(blob.has_unused());
+    EXPECT_FALSE(blob.is_unused(0, blob_len));
+
+    blob.add_unused(0, 0);
+    EXPECT_FALSE(blob.has_unused());
+}
+
+TEST(BluestoreBlob, IsAllocated) {
+    bluestore_blob_t blob;
+    uint32_t blob_len = 0x4000;
+    blob.add_tail(blob_len);
+    blob.dirty_extents().clear();
+    blob.dirty_extents().emplace_back(0x10000, 0x2000);
+    blob.dirty_extents().emplace_back(bluestore_pextent_t::INVALID_OFFSET, 0x2000);
+
+    EXPECT_TRUE(blob.is_allocated(0, 0x2000));
+    EXPECT_FALSE(blob.is_allocated(0x2000, 0x2000));
+    EXPECT_FALSE(blob.is_allocated(0, 0x4000));
+    EXPECT_TRUE(blob.is_unallocated(0x2000, 0x2000));
+    EXPECT_FALSE(blob.is_unallocated(0, 0x4000));
+}

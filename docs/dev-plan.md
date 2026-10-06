@@ -1036,7 +1036,7 @@ is_mutable 调用点共 6 处（grep 确认），全在写路径: `blob.cc:50`�
 | 文件 | 内容 |
 | --- | --- |
 | `bluestore/bluestore_types.h` | 加 `unused_t unused` 字段（参考 Ceph 467）；`is_mutable()` 改为恒 true（cxxlab 无 compression/shared）；补 `is_allocated()`（`_validate_range(b_off, b_len, true)`，已有 is_unallocated 的对称）；补 `is_unused()`/`add_unused()`/`mark_used()`（参考 Ceph 666-709）；DENC 版本升级 |
-| `bluestore/blob.cc` | `can_reuse_blob`（93）移除 `if (has_unused()) return false;`（Ceph 无此检查） |
+| `bluestore/blob.cc` | 不变（`can_reuse_blob` 的 has_unused 检查在 add_tail 分支，与 Ceph `BlueStore.cc:2362` 一致，保留） |
 
 Ceph 参考: `bluestore_types.h:467`（unused 字段）、`586-588`（is_mutable）、`628-651`（_validate_range）、`655-663`（is_allocated/is_unallocated）、`666-699`（is_unused/add_unused）、`702-712`（mark_used）。
 
