@@ -34,7 +34,7 @@ public:
     double get_fragmentation() override;
 
     void dump() override;
-    void foreach(
+    void foreach (
         std::function<void(uint64_t offset, uint64_t length)> notify) override;
 
     void init_add_free(uint64_t offset, uint64_t length) override;

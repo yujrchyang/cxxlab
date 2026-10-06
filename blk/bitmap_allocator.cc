@@ -135,8 +135,8 @@ public:
 // =====================================================================
 
 void AllocatorLevel01Loose::_init(uint64_t capacity,
-                                   uint64_t alloc_unit,
-                                   bool mark_as_free) {
+                                  uint64_t alloc_unit,
+                                  bool mark_as_free) {
     l0_granularity = alloc_unit;
     l1_granularity = alloc_unit * bits_per_slotset;
 
@@ -149,13 +149,13 @@ void AllocatorLevel01Loose::_init(uint64_t capacity,
     uint64_t l0_cnt = aligned / alloc_unit / bits_per_slot;
     l0.assign(l0_cnt, mark_as_free ? all_slot_set : all_slot_clear);
 
-    if (!mark_as_free) {
+    if (mark_as_free) {
         uint64_t l0_no_use = round_up(capacity, l0_granularity) / l0_granularity;
         _mark_alloc_l1_l0(l0_no_use, aligned / l0_granularity);
     }
     partial_l1_count = 0;
     unalloc_l1_count = mark_as_free
-        ? l1.size() * L1_ENTRIES_PER_SLOT * slots_per_slotset
+        ? l1.size() * L1_ENTRIES_PER_SLOT
         : 0;
 }
 
@@ -786,6 +786,9 @@ int64_t BitmapAllocator::allocate(uint64_t want, uint64_t unit,
 }
 
 void BitmapAllocator::release(const interval_set<uint64_t> &release_set) {
+    for (auto p = release_set.begin(); p != release_set.end(); ++p) {
+        cxxlab_assert(p.get_start() + p.get_len() <= uint64_t(device_size));
+    }
     impl_->_free_l2(release_set);
 }
 
@@ -809,7 +812,7 @@ void BitmapAllocator::dump() {
     }
 }
 
-void BitmapAllocator::foreach(
+void BitmapAllocator::foreach (
     std::function<void(uint64_t offset, uint64_t length)> notify) {
     impl_->foreach_internal(notify);
 }

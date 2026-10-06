@@ -31,20 +31,28 @@ void HybridAllocator::_spillover_range(uint64_t start, uint64_t end) {
 int64_t HybridAllocator::allocate(uint64_t want, uint64_t unit,
                                   uint64_t max_alloc_size, int64_t hint,
                                   PExtentVector *extents) {
+    cxxlab_assert(isp2(unit));
+    cxxlab_assert(want % unit == 0);
+
+    if (max_alloc_size == 0)
+        max_alloc_size = want;
+
+    constexpr auto cap = std::numeric_limits<decltype(pextent_t::length)>::max();
+    if (max_alloc_size >= cap)
+        max_alloc_size = p2align(uint64_t(cap), uint64_t(block_size_));
+
     uint64_t allocated = 0;
-    {
-        std::lock_guard l(lock_);
-        PExtentVector avl_extents;
-        int64_t r = _allocate(want, unit, max_alloc_size, hint, &avl_extents);
-        if (r > 0) {
-            allocated = static_cast<uint64_t>(r);
-            extents->insert(extents->end(), avl_extents.begin(), avl_extents.end());
-        }
+    std::lock_guard l(lock_);
+    PExtentVector avl_extents;
+    int64_t r = _allocate(want, unit, max_alloc_size, hint, &avl_extents);
+    if (r > 0) {
+        allocated = static_cast<uint64_t>(r);
+        extents->insert(extents->end(), avl_extents.begin(), avl_extents.end());
     }
     if (allocated < want) {
         PExtentVector child_extents;
-        int64_t r = child_->allocate(want - allocated, unit,
-                                     max_alloc_size, hint, &child_extents);
+        r = child_->allocate(want - allocated, unit,
+                             max_alloc_size, hint, &child_extents);
         if (r > 0) {
             allocated += static_cast<uint64_t>(r);
             extents->insert(extents->end(), child_extents.begin(), child_extents.end());
@@ -58,21 +66,25 @@ void HybridAllocator::release(const interval_set<uint64_t> &release_set) {
 }
 
 uint64_t HybridAllocator::get_free() {
-    return AvlAllocator::get_free() + child_->get_free();
+    std::lock_guard l(lock_);
+    return _get_free() + child_->get_free();
 }
 
 double HybridAllocator::get_fragmentation() {
-    return AvlAllocator::get_fragmentation();
+    std::lock_guard l(lock_);
+    return _get_fragmentation();
 }
 
 void HybridAllocator::dump() {
-    AvlAllocator::dump();
+    std::lock_guard l(lock_);
+    _dump();
     child_->dump();
 }
 
 void HybridAllocator::foreach (
     std::function<void(uint64_t offset, uint64_t length)> notify) {
-    AvlAllocator::foreach (notify);
+    std::lock_guard l(lock_);
+    _foreach(notify);
     child_->foreach (notify);
 }
 
@@ -84,8 +96,12 @@ void HybridAllocator::init_rm_free(uint64_t offset, uint64_t length) {
     if (!length) return;
     std::lock_guard l(lock_);
     cxxlab_assert(offset + length <= uint64_t(device_size));
-    if (!_remove_from_tree(offset, length))
-        child_->init_rm_free(offset, length);
+    _try_remove_from_tree(offset, length,
+                          [this](uint64_t off, uint64_t len, bool found) {
+                              if (!found) {
+                                  child_->init_rm_free(off, len);
+                              }
+                          });
 }
 
 void HybridAllocator::shutdown() {

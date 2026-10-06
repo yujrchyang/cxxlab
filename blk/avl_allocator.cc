@@ -1,5 +1,6 @@
 #include <algorithm>
 #include <cerrno>
+#include <iostream>
 #include <limits>
 
 #include "blk/avl_allocator.h"
@@ -356,8 +357,11 @@ double AvlAllocator::get_fragmentation() {
 }
 
 void AvlAllocator::_dump() const {
-    for (auto &rs : range_tree_) {
-        (void)rs;
+    std::cerr << "AvlAllocator: " << range_tree_.size() << " ranges, "
+              << num_free_ << " bytes free\n";
+    for (const auto &rs : range_tree_) {
+        std::cerr << "  [0x" << std::hex << rs.start << ", 0x" << rs.end
+                  << ") len=0x" << (rs.end - rs.start) << std::dec << "\n";
     }
 }
 

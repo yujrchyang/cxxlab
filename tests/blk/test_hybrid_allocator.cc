@@ -1,9 +1,11 @@
 #include <gtest/gtest.h>
 
+#include <atomic>
 #include <cerrno>
 #include <cstdint>
 #include <memory>
 #include <set>
+#include <thread>
 #include <vector>
 
 #include "blk/allocator.h"
@@ -193,6 +195,41 @@ TEST_F(HybridAllocatorTest, StressReleaseAlloc) {
     }
     for (auto &e : allocs)
         alloc->release(e);
+    EXPECT_EQ(alloc->get_free(), DEV_SIZE);
+}
+
+
+
+TEST_F(HybridAllocatorTest, AllocateMaxAllocSizeZero) {
+    init_all_free();
+    PExtentVector extents;
+    int64_t r = alloc->allocate(BLOCK_SIZE * 4, BLOCK_SIZE, 0, 0, &extents);
+    ASSERT_GT(r, 0);
+    EXPECT_EQ(r, BLOCK_SIZE * 4);
+}
+
+TEST_F(HybridAllocatorTest, ConcurrentAllocateRelease) {
+    init_all_free();
+    std::atomic<int> success_count{0};
+    const int num_threads = 8;
+    const int ops_per_thread = 50;
+
+    std::vector<std::thread> threads;
+    for (int i = 0; i < num_threads; ++i) {
+        threads.emplace_back([&] {
+            for (int j = 0; j < ops_per_thread; ++j) {
+                PExtentVector e;
+                if (alloc->allocate(BLOCK_SIZE, BLOCK_SIZE, 0, 0, &e) > 0) {
+                    success_count.fetch_add(1);
+                    alloc->release(e);
+                }
+            }
+        });
+    }
+    for (auto &t : threads)
+        t.join();
+
+    EXPECT_EQ(success_count.load(), num_threads * ops_per_thread);
     EXPECT_EQ(alloc->get_free(), DEV_SIZE);
 }
 
