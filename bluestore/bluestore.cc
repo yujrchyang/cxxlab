@@ -1635,60 +1635,69 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
         ? it
         : o->extent_map.begin();
 
-    for (auto ep = search_start; ep != o->extent_map.end(); ++ep) {
-        if (ep->logical_offset >= offset + max_bsize) break;
-        uint64_t bstart = ep->blob_start();
-        if (bstart > offset || bstart < min_off) continue;
-        if (!ep->blob->get_blob().is_mutable()) continue;
+    auto begin = o->extent_map.begin();
+    auto end = o->extent_map.end();
+    auto ep = search_start;
+    auto prev_ep = (search_start != begin) ? std::prev(search_start) : end;
 
-        uint64_t b_off = offset - bstart;
-        uint32_t alloc_len32 = alloc_len;
-        if (!ep->blob->can_reuse_blob(min_alloc_size_, max_bsize, b_off,
-                                      &alloc_len32)) {
-            continue;
-        }
+    bool any_change;
+    do {
+        any_change = false;
 
-        o->extent_map.punch_hole(offset, length, &wctx->old_extents);
+        if (ep != end && ep->logical_offset < offset + max_bsize) {
+            uint64_t bstart = ep->blob_start();
+            if (!(bstart > offset || bstart < min_off) &&
+                ep->blob->get_blob().is_mutable()) {
+                uint64_t b_off = offset - bstart;
+                uint32_t alloc_len32 = alloc_len;
+                if (ep->blob->can_reuse_blob(min_alloc_size_, max_bsize,
+                                             b_off, &alloc_len32)) {
+                    o->extent_map.punch_hole(offset, length,
+                                             &wctx->old_extents);
 
-        uint64_t b_off0 = b_off;
-        bufferlist padded_bl = bl;
-        _pad_zeros(&padded_bl, &b_off0, chunk_size);
+                    uint64_t b_off0 = b_off;
+                    bufferlist padded_bl = bl;
+                    _pad_zeros(&padded_bl, &b_off0, chunk_size);
 
-        alloc_len = alloc_len32;
-        wctx->write(offset, ep->blob, alloc_len, b_off0, padded_bl, b_off,
-                    length, false);
-        return;
-    }
-
-    if (search_start != o->extent_map.begin()) {
-        auto rp = std::prev(search_start);
-        while (true) {
-            if (rp->logical_offset >= min_off) {
-                uint64_t bstart = rp->blob_start();
-                if (bstart <= offset && bstart >= min_off &&
-                    rp->blob->get_blob().is_mutable()) {
-                    uint64_t b_off = offset - bstart;
-                    uint32_t alloc_len32 = alloc_len;
-                    if (rp->blob->can_reuse_blob(min_alloc_size_, max_bsize,
-                                                 b_off, &alloc_len32)) {
-                        o->extent_map.punch_hole(offset, length,
-                                                 &wctx->old_extents);
-
-                        uint64_t b_off0 = b_off;
-                        bufferlist padded_bl = bl;
-                        _pad_zeros(&padded_bl, &b_off0, chunk_size);
-
-                        alloc_len = alloc_len32;
-                        wctx->write(offset, rp->blob, alloc_len, b_off0,
-                                    padded_bl, b_off, length, false);
-                        return;
-                    }
+                    alloc_len = alloc_len32;
+                    wctx->write(offset, ep->blob, alloc_len, b_off0,
+                                padded_bl, b_off, length, false);
+                    return;
                 }
             }
-            if (rp == o->extent_map.begin()) break;
-            --rp;
+            ++ep;
+            any_change = true;
         }
-    }
+
+        if (prev_ep != end && prev_ep->logical_offset >= min_off) {
+            uint64_t bstart = prev_ep->blob_start();
+            if (bstart <= offset && bstart >= min_off &&
+                prev_ep->blob->get_blob().is_mutable()) {
+                uint64_t b_off = offset - bstart;
+                uint32_t alloc_len32 = alloc_len;
+                if (prev_ep->blob->can_reuse_blob(min_alloc_size_, max_bsize,
+                                                  b_off, &alloc_len32)) {
+                    o->extent_map.punch_hole(offset, length,
+                                             &wctx->old_extents);
+
+                    uint64_t b_off0 = b_off;
+                    bufferlist padded_bl = bl;
+                    _pad_zeros(&padded_bl, &b_off0, chunk_size);
+
+                    alloc_len = alloc_len32;
+                    wctx->write(offset, prev_ep->blob, alloc_len, b_off0,
+                                padded_bl, b_off, length, false);
+                    return;
+                }
+            }
+            if (prev_ep != begin) {
+                --prev_ep;
+                any_change = true;
+            } else {
+                prev_ep = end;
+            }
+        }
+    } while (any_change);
 
     uint64_t b_off = offset % alloc_len;
     uint64_t b_off0 = b_off;
@@ -1743,44 +1752,62 @@ void BlueStore::_do_write_big(TransContext *txc, Collection *ch, OnodeRef o,
         BlobRef b = nullptr;
         uint64_t b_off = 0;
 
-        for (auto ep = search_start; ep != o->extent_map.end(); ++ep) {
-            if (ep->logical_offset >= offset + max_bsize) break;
-            uint64_t bstart = ep->blob_start();
-            if (bstart > offset || bstart < min_off) continue;
-            if (!ep->blob->get_blob().is_mutable()) continue;
+        auto begin = o->extent_map.begin();
+        auto end = o->extent_map.end();
+        auto ep = search_start;
+        auto prev_ep = (search_start != begin) ? std::prev(search_start) : end;
 
-            b_off = offset - bstart;
-            uint32_t l32 = l;
-            if (!ep->blob->can_reuse_blob(min_alloc_size_, max_bsize, b_off,
-                                          &l32)) {
-                continue;
-            }
-            b = ep->blob;
-            l = l32;
-            break;
-        }
+        bool any_change;
+        do {
+            any_change = false;
 
-        if (b == nullptr && search_start != o->extent_map.begin()) {
-            auto rp = std::prev(search_start);
-            while (true) {
-                if (rp->logical_offset >= min_off) {
-                    uint64_t bstart = rp->blob_start();
-                    if (bstart <= offset && bstart >= min_off &&
-                        rp->blob->get_blob().is_mutable()) {
-                        b_off = offset - bstart;
-                        uint32_t l32 = l;
-                        if (rp->blob->can_reuse_blob(min_alloc_size_,
-                                                     max_bsize, b_off, &l32)) {
-                            b = rp->blob;
-                            l = l32;
-                            break;
-                        }
+            if (ep != end && ep->logical_offset < offset + max_bsize) {
+                uint64_t bstart = ep->blob_start();
+                if (!(bstart > offset || bstart < min_off) &&
+                    ep->blob->get_blob().is_mutable()) {
+                    b_off = offset - bstart;
+                    uint32_t l32 = l;
+                    if (ep->blob->can_reuse_blob(min_alloc_size_, max_bsize,
+                                                 b_off, &l32)) {
+                        b = ep->blob;
+                        l = l32;
+                        prev_ep = end;
+                    } else {
+                        ++ep;
+                        any_change = true;
                     }
+                } else {
+                    ++ep;
+                    any_change = true;
                 }
-                if (rp == o->extent_map.begin()) break;
-                --rp;
             }
-        }
+
+            if (b == nullptr && prev_ep != end &&
+                prev_ep->logical_offset >= min_off) {
+                uint64_t bstart = prev_ep->blob_start();
+                if (bstart <= offset && bstart >= min_off &&
+                    prev_ep->blob->get_blob().is_mutable()) {
+                    b_off = offset - bstart;
+                    uint32_t l32 = l;
+                    if (prev_ep->blob->can_reuse_blob(min_alloc_size_,
+                                                      max_bsize, b_off,
+                                                      &l32)) {
+                        b = prev_ep->blob;
+                        l = l32;
+                    } else if (prev_ep != begin) {
+                        --prev_ep;
+                        any_change = true;
+                    } else {
+                        prev_ep = end;
+                    }
+                } else if (prev_ep != begin) {
+                    --prev_ep;
+                    any_change = true;
+                } else {
+                    prev_ep = end;
+                }
+            }
+        } while (b == nullptr && any_change);
 
         bool new_blob = (b == nullptr);
         if (new_blob) {
