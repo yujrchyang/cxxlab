@@ -1479,3 +1479,100 @@ TEST_F(WritePathTest, DirectWriteUnused) {
 
     ASSERT_EQ(store.umount(), 0);
 }
+
+TEST_F(WritePathTest, BigWriteDeferredRMW) {
+    BlueStore store;
+    auto cfg = make_config();
+    cfg.prefer_deferred_size = 131072;
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 53;
+    oid.oid = "big_deferred_rmw";
+
+    auto do_write = [&](uint64_t off, const std::string &data) {
+        bufferlist bl;
+        bl.append(data);
+        BlueStoreTransaction bt;
+        bt.write(oid, off, bl.length(), bl);
+        std::vector<BlueStoreTransaction> tls;
+        tls.push_back(std::move(bt));
+        std::atomic<bool> committed{false};
+        EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+            committed = true;
+        }),
+                  0);
+        coll->get_osr()->flush();
+        EXPECT_TRUE(wait_commit(committed));
+    };
+
+    do_write(0, std::string(256 * 1024, 'A'));
+    do_write(0, std::string(96 * 1024, 'B'));
+
+    auto do_read = [&](uint64_t off, uint64_t len) -> std::string {
+        bufferlist bl;
+        EXPECT_EQ(store.read(coll, oid, off, len, bl), (int)len);
+        return bl.to_str();
+    };
+
+    EXPECT_EQ(do_read(0, 96 * 1024), std::string(96 * 1024, 'B'));
+    EXPECT_EQ(do_read(96 * 1024, 160 * 1024),
+              std::string(160 * 1024, 'A'));
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, BigWriteDeferredPersistence) {
+    BlueStore store;
+    auto cfg = make_config();
+    cfg.prefer_deferred_size = 131072;
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 54;
+    oid.oid = "big_deferred_persist";
+
+    auto do_write = [&](uint64_t off, const std::string &data) {
+        bufferlist bl;
+        bl.append(data);
+        BlueStoreTransaction bt;
+        bt.write(oid, off, bl.length(), bl);
+        std::vector<BlueStoreTransaction> tls;
+        tls.push_back(std::move(bt));
+        std::atomic<bool> committed{false};
+        EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+            committed = true;
+        }),
+                  0);
+        coll->get_osr()->flush();
+        EXPECT_TRUE(wait_commit(committed));
+    };
+
+    do_write(0, std::string(256 * 1024, 'A'));
+    do_write(0, std::string(96 * 1024, 'B'));
+
+    ASSERT_EQ(store.umount(), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll2 = store.get_collection(1);
+    ASSERT_NE(coll2, nullptr);
+
+    bufferlist read_bl;
+    EXPECT_EQ(store.read(coll2, oid, 0, 256 * 1024, read_bl), 256 * 1024);
+    std::string result = read_bl.to_str();
+    EXPECT_EQ(result.substr(0, 96 * 1024), std::string(96 * 1024, 'B'));
+    EXPECT_EQ(result.substr(96 * 1024, 160 * 1024),
+              std::string(160 * 1024, 'A'));
+
+    ASSERT_EQ(store.umount(), 0);
+}

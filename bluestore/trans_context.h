@@ -329,4 +329,17 @@ struct WriteContext {
     }
 };
 
+struct BigDeferredWriteContext {
+    uint64_t off = 0;
+    uint32_t b_off = 0;
+    uint32_t used = 0;
+    uint64_t head_read = 0;
+    uint64_t tail_read = 0;
+    BlobRef blob_ref;
+    uint64_t blob_start = 0;
+    PExtentVector res_extents;
+
+    uint64_t blob_aligned_len() const { return used + head_read + tail_read; }
+};
+
 }  // namespace TOPNSPC

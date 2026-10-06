@@ -1864,6 +1864,43 @@ void BlueStore::_do_write_big(TransContext *txc, Collection *ch, OnodeRef o,
             continue;
         }
 
+        if (cfg_.prefer_deferred_size &&
+            l <= cfg_.prefer_deferred_size * 2) {
+            auto ep = o->extent_map.seek_lextent(offset);
+            BigDeferredWriteContext head_info, tail_info;
+            bool will_defer = (ep != o->extent_map.end()) &&
+                _can_defer(head_info, ep, offset, l);
+            uint64_t offset_next = offset + head_info.used;
+            uint64_t remaining = l - head_info.used;
+            if (will_defer && remaining &&
+                remaining <= cfg_.prefer_deferred_size) {
+                auto ep_next = o->extent_map.seek_lextent(offset_next);
+                will_defer =
+                    (ep_next != o->extent_map.end()) &&
+                    _can_defer(tail_info, ep_next, offset_next, remaining) &&
+                    remaining == tail_info.used;
+            } else if (will_defer && remaining) {
+                will_defer = false;
+            }
+            if (will_defer) {
+                will_defer = _apply_defer(head_info);
+                if (will_defer && remaining) {
+                    will_defer = _apply_defer(tail_info);
+                }
+            }
+            if (will_defer) {
+                _do_write_big_apply_deferred(txc, o, head_info, bl, bl_pos,
+                                             wctx);
+                if (remaining) {
+                    _do_write_big_apply_deferred(txc, o, tail_info, bl,
+                                                 bl_pos, wctx);
+                }
+                offset += l;
+                length -= l;
+                continue;
+            }
+        }
+
         o->extent_map.punch_hole(offset, l, &wctx->old_extents);
 
         auto it = o->extent_map.seek_lextent(offset);
@@ -2209,6 +2246,99 @@ void BlueStore::_finish_write(TransContext *txc) {
         b->bc().finish_write(cache, txc->seq);
     }
     txc->blobs_written.clear();
+}
+
+bool BlueStore::_can_defer(BigDeferredWriteContext &dctx,
+                           ExtentMap::iterator ep,
+                           uint64_t offset, uint64_t l) {
+    bool res = false;
+    auto &blob = ep->blob->get_blob();
+    if (offset >= ep->blob_start() && blob.is_mutable()) {
+        dctx.off = offset;
+        dctx.b_off = offset - ep->blob_start();
+        uint64_t chunk_size = blob.get_chunk_size(block_size_);
+        uint64_t ondisk = blob.get_ondisk_length();
+        if (dctx.b_off >= ondisk) {
+            return false;
+        }
+        dctx.used = std::min(l, ondisk - dctx.b_off);
+        dctx.head_read = p2phase<uint64_t>(dctx.b_off, chunk_size);
+        dctx.tail_read = p2nphase<uint64_t>(dctx.b_off + dctx.used, chunk_size);
+        dctx.b_off -= dctx.head_read;
+        cxxlab_assert(dctx.b_off % chunk_size == 0);
+        cxxlab_assert(dctx.blob_aligned_len() % chunk_size == 0);
+        res = dctx.blob_aligned_len() < cfg_.prefer_deferred_size &&
+            dctx.blob_aligned_len() <= ondisk &&
+            blob.is_allocated(dctx.b_off, dctx.blob_aligned_len());
+        if (res) {
+            dctx.blob_ref = ep->blob;
+            dctx.blob_start = ep->blob_start();
+        }
+    }
+    return res;
+}
+
+bool BlueStore::_apply_defer(BigDeferredWriteContext &dctx) {
+    auto &blob = dctx.blob_ref->get_blob();
+    uint64_t blob_off = 0;
+    uint64_t write_start = dctx.b_off;
+    uint64_t write_end = dctx.b_off + dctx.blob_aligned_len();
+    for (const auto &ex : blob.get_extents()) {
+        uint64_t ext_end = blob_off + ex.length;
+        if (write_start < ext_end && write_end > blob_off) {
+            uint64_t s = std::max(write_start, blob_off);
+            uint64_t e = std::min(write_end, ext_end);
+            uint64_t phys_s = ex.offset + (s - blob_off);
+            uint64_t phys_len = e - s;
+            if (ex.offset < phys_s ||
+                ex.offset + ex.length > phys_s + phys_len) {
+                dctx.res_extents.emplace_back(
+                    bluestore_pextent_t(phys_s, phys_len));
+            } else {
+                return false;
+            }
+        }
+        blob_off = ext_end;
+    }
+    return true;
+}
+
+void BlueStore::_do_write_big_apply_deferred(
+    TransContext *txc, OnodeRef o, BigDeferredWriteContext &dctx,
+    bufferlist &bl, uint64_t &bl_pos, WriteContext *wctx) {
+    bufferlist out;
+    if (dctx.head_read) {
+        int r = _do_read(o, dctx.off - dctx.head_read, dctx.head_read, out);
+        cxxlab_assert(r >= 0);
+        if (out.length() < dctx.head_read) {
+            out.append_zero(dctx.head_read - out.length());
+        }
+    }
+    bufferlist data;
+    data.substr_of(bl, bl_pos, dctx.used);
+    out.claim_append(data);
+    if (dctx.tail_read) {
+        bufferlist tail_bl;
+        int r = _do_read(o, dctx.off + dctx.used, dctx.tail_read, tail_bl);
+        cxxlab_assert(r >= 0);
+        if (tail_bl.length() < dctx.tail_read) {
+            tail_bl.append_zero(dctx.tail_read - tail_bl.length());
+        }
+        out.claim_append(tail_bl);
+    }
+    _buffer_cache_write(txc, dctx.blob_ref, dctx.b_off, out, 0);
+    dctx.blob_ref->dirty_blob().calc_csum(dctx.b_off, out, block_size_);
+    auto le = o->extent_map.set_lextent(
+        static_cast<uint32_t>(dctx.off),
+        static_cast<uint32_t>(dctx.off - dctx.blob_start),
+        static_cast<uint32_t>(dctx.used), dctx.blob_ref,
+        &wctx->old_extents);
+    dctx.blob_ref->dirty_blob().mark_used(le->blob_offset, le->length);
+    bluestore_deferred_op_t *op = _get_deferred_op(txc, out.length());
+    op->op = bluestore_deferred_op_t::OP_WRITE;
+    op->extents.swap(dctx.res_extents);
+    op->data = std::move(out);
+    bl_pos += dctx.used;
 }
 
 // FSCK implementation

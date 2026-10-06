@@ -252,6 +252,14 @@ private:
                              bufferlist &bl, unsigned flags);
     void _finish_write(TransContext *txc);
 
+    bool _can_defer(BigDeferredWriteContext &dctx, ExtentMap::iterator ep,
+                    uint64_t offset, uint64_t l);
+    bool _apply_defer(BigDeferredWriteContext &dctx);
+    void _do_write_big_apply_deferred(TransContext *txc, OnodeRef o,
+                                      BigDeferredWriteContext &dctx,
+                                      bufferlist &bl, uint64_t &bl_pos,
+                                      WriteContext *wctx);
+
     void _kv_start();
     void _kv_stop();
     void _kv_sync_thread_main();
