@@ -352,6 +352,24 @@ public:
         }
     }
 
+    template <typename F>
+    int map(uint64_t b_off, uint64_t b_len, F &&f) const {
+        uint64_t extent_off = 0;
+        for (const auto &ex : extents) {
+            uint64_t extent_end = extent_off + ex.length;
+            if (b_off < extent_end && b_off + b_len > extent_off) {
+                uint64_t s = std::max(b_off, extent_off);
+                uint64_t e_end = std::min(b_off + b_len, extent_end);
+                f(ex.offset + (s - extent_off), e_end - s);
+            }
+            extent_off = extent_end;
+            if (extent_off >= b_off + b_len) {
+                break;
+            }
+        }
+        return 0;
+    }
+
     void add_tail(uint32_t new_len) {
         extents.emplace_back(bluestore_pextent_t(bluestore_pextent_t::INVALID_OFFSET,
                                                  new_len - logical_length));

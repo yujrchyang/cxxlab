@@ -70,6 +70,19 @@ public:
                          uint32_t length, BlobRef b,
                          std::vector<OldExtent> *old_extents);
 
+    bool has_any_lextents(uint64_t offset, uint64_t length) const {
+        for (const auto &e : extent_map_) {
+            if (e.logical_offset >= offset + length) {
+                break;
+            }
+            if (e.logical_end() <= offset) {
+                continue;
+            }
+            return true;
+        }
+        return false;
+    }
+
     int compress_extent_map(uint64_t offset, uint64_t length);
 
     bool needs_reshard() const { return false; }

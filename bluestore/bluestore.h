@@ -210,6 +210,7 @@ private:
     void _wctx_finish(TransContext *txc, WriteContext *wctx);
     void _choose_write_options(WriteContext *wctx);
     void _pad_zeros(bufferlist *bl, uint64_t *offset, uint64_t chunk_size);
+    void _apply_padding(uint64_t head_pad, uint64_t tail_pad, bufferlist &bl);
 
     int _do_read(OnodeRef o, uint64_t offset, uint64_t length, bufferlist &bl);
 

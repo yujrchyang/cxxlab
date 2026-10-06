@@ -1387,3 +1387,95 @@ TEST_F(WritePathTest, InterleavedSearchReuse) {
 
     ASSERT_EQ(store.umount(), 0);
 }
+
+TEST_F(WritePathTest, RMWUnalignedOverwrite) {
+    BlueStore store;
+    auto cfg = make_config();
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 51;
+    oid.oid = "rmw_overwrite";
+
+    auto do_write = [&](uint64_t off, const std::string &data) {
+        bufferlist bl;
+        bl.append(data);
+        BlueStoreTransaction bt;
+        bt.write(oid, off, bl.length(), bl);
+        std::vector<BlueStoreTransaction> tls;
+        tls.push_back(std::move(bt));
+        std::atomic<bool> committed{false};
+        EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+            committed = true;
+        }),
+                  0);
+        coll->get_osr()->flush();
+        EXPECT_TRUE(wait_commit(committed));
+    };
+
+    do_write(0, std::string(4096, 'A'));
+    do_write(100, std::string(100, 'B'));
+
+    bufferlist read_bl;
+    EXPECT_EQ(store.read(coll, oid, 0, 4096, read_bl), 4096);
+    std::string result = read_bl.to_str();
+    EXPECT_EQ(result.substr(0, 100), std::string(100, 'A'));
+    EXPECT_EQ(result.substr(100, 100), std::string(100, 'B'));
+    EXPECT_EQ(result.substr(200, 3896), std::string(3896, 'A'));
+
+    ASSERT_EQ(store.umount(), 0);
+}
+
+TEST_F(WritePathTest, DirectWriteUnused) {
+    BlueStore store;
+    auto cfg = make_config();
+    ASSERT_EQ(store.mkfs(cfg), 0);
+    ASSERT_EQ(store.mount(cfg), 0);
+
+    auto coll = store.create_collection(1, 5);
+    ASSERT_NE(coll, nullptr);
+
+    ghobject_t oid;
+    oid.pool = 1;
+    oid.hash = 52;
+    oid.oid = "direct_write_unused";
+
+    auto do_write = [&](uint64_t off, const std::string &data) {
+        bufferlist bl;
+        bl.append(data);
+        BlueStoreTransaction bt;
+        bt.write(oid, off, bl.length(), bl);
+        std::vector<BlueStoreTransaction> tls;
+        tls.push_back(std::move(bt));
+        std::atomic<bool> committed{false};
+        EXPECT_EQ(store.queue_transactions(coll, tls, [&committed]() {
+            committed = true;
+        }),
+                  0);
+        coll->get_osr()->flush();
+        EXPECT_TRUE(wait_commit(committed));
+    };
+
+    do_write(0, std::string(4096, 'A'));
+
+    auto on = coll->get_onode(oid, false);
+    ASSERT_NE(on, nullptr);
+    ASSERT_FALSE(on->extent_map.empty());
+    auto ext = *on->extent_map.begin();
+    ext.blob->dirty_blob().add_unused(4096, 65536 - 4096);
+
+    do_write(4096, std::string(4096, 'B'));
+
+    bufferlist read_a, read_b;
+    EXPECT_EQ(store.read(coll, oid, 0, 4096, read_a), 4096);
+    EXPECT_EQ(read_a.to_str(), std::string(4096, 'A'));
+    EXPECT_EQ(store.read(coll, oid, 4096, 4096, read_b), 4096);
+    EXPECT_EQ(read_b.to_str(), std::string(4096, 'B'));
+
+    ASSERT_EQ(store.umount(), 0);
+}

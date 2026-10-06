@@ -1053,6 +1053,19 @@ void BlueStore::_pad_zeros(bufferlist *bl, uint64_t *offset,
     }
 }
 
+void BlueStore::_apply_padding(uint64_t head_pad, uint64_t tail_pad,
+                               bufferlist &bl) {
+    if (head_pad) {
+        bufferlist h;
+        h.append_zero(head_pad);
+        h.claim_append(bl);
+        bl.swap(h);
+    }
+    if (tail_pad) {
+        bl.append_zero(tail_pad);
+    }
+}
+
 static uint64_t _blob_to_phys(const bluestore_blob_t &blob, uint64_t b_off) {
     uint64_t off = 0;
     for (const auto &e : blob.get_extents()) {
@@ -1648,20 +1661,129 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
             uint64_t bstart = ep->blob_start();
             if (!(bstart > offset || bstart < min_off) &&
                 ep->blob->get_blob().is_mutable()) {
-                uint64_t b_off = offset - bstart;
+                uint64_t blob_chunk_size =
+                    ep->blob->get_blob().get_chunk_size(block_size_);
+                uint64_t end_offs = offset + length;
+                uint64_t head_pad = p2phase(offset, blob_chunk_size);
+                uint64_t tail_pad = p2nphase(end_offs, blob_chunk_size);
+                if (head_pad && o->extent_map.has_any_lextents(offset - head_pad, head_pad)) {
+                    head_pad = 0;
+                }
+                if (tail_pad && o->extent_map.has_any_lextents(end_offs, tail_pad)) {
+                    tail_pad = 0;
+                }
+                uint64_t b_off = offset - head_pad - bstart;
+                uint64_t b_len = length + head_pad + tail_pad;
+
+                if ((b_off % blob_chunk_size == 0 &&
+                     b_len % blob_chunk_size == 0) &&
+                    ep->blob->get_blob().get_ondisk_length() >=
+                        b_off + b_len &&
+                    ep->blob->get_blob().is_unused(b_off, b_len) &&
+                    ep->blob->get_blob().is_allocated(b_off, b_len)) {
+                    bufferlist padded_bl = bl;
+                    _apply_padding(head_pad, tail_pad, padded_bl);
+                    _buffer_cache_write(txc, ep->blob, b_off, padded_bl, 0);
+                    bluestore_deferred_op_t *op =
+                        _get_deferred_op(txc, padded_bl.length());
+                    op->op = bluestore_deferred_op_t::OP_WRITE;
+                    ep->blob->get_blob().map(
+                        b_off, b_len, [&](uint64_t off, uint64_t len) {
+                            op->extents.emplace_back(
+                                bluestore_pextent_t(off, len));
+                            return 0;
+                        });
+                    op->data = padded_bl;
+                    ep->blob->dirty_blob().calc_csum(b_off, padded_bl,
+                                                     block_size_);
+                    auto le = o->extent_map.set_lextent(
+                        static_cast<uint32_t>(offset),
+                        static_cast<uint32_t>(b_off + head_pad),
+                        static_cast<uint32_t>(length), ep->blob,
+                        &wctx->old_extents);
+                    ep->blob->dirty_blob().mark_used(le->blob_offset,
+                                                     le->length);
+                    return;
+                }
+
+                uint64_t head_read = p2phase(b_off, blob_chunk_size);
+                uint64_t tail_read =
+                    p2nphase(b_off + b_len, blob_chunk_size);
+                if ((head_read || tail_read) &&
+                    ep->blob->get_blob().get_ondisk_length() >=
+                        b_off + b_len + tail_read &&
+                    head_read + tail_read < min_alloc_size_) {
+                    b_off -= head_read;
+                    b_len += head_read + tail_read;
+                    if (b_off % blob_chunk_size == 0 &&
+                        b_len % blob_chunk_size == 0 &&
+                        ep->blob->get_blob().is_allocated(b_off, b_len)) {
+                        bufferlist padded_bl = bl;
+                        _apply_padding(head_pad, tail_pad, padded_bl);
+                        if (head_read) {
+                            bufferlist head_bl;
+                            int r = _do_read(o, offset - head_pad - head_read,
+                                             head_read, head_bl);
+                            cxxlab_assert(r >= 0);
+                            if (head_bl.length() < head_read) {
+                                head_bl.append_zero(head_read -
+                                                    head_bl.length());
+                            }
+                            head_bl.claim_append(padded_bl);
+                            padded_bl.swap(head_bl);
+                        }
+                        if (tail_read) {
+                            bufferlist tail_bl;
+                            int r = _do_read(o, offset + length + tail_pad,
+                                             tail_read, tail_bl);
+                            cxxlab_assert(r >= 0);
+                            if (tail_bl.length() < tail_read) {
+                                tail_bl.append_zero(tail_read -
+                                                    tail_bl.length());
+                            }
+                            padded_bl.claim_append(tail_bl);
+                        }
+                        _buffer_cache_write(txc, ep->blob, b_off,
+                                            padded_bl, 0);
+                        ep->blob->dirty_blob().calc_csum(b_off,
+                                                         padded_bl,
+                                                         block_size_);
+                        bluestore_deferred_op_t *op =
+                            _get_deferred_op(txc, padded_bl.length());
+                        op->op = bluestore_deferred_op_t::OP_WRITE;
+                        ep->blob->get_blob().map(
+                            b_off, b_len,
+                            [&](uint64_t off, uint64_t len) {
+                                op->extents.emplace_back(
+                                    bluestore_pextent_t(off, len));
+                                return 0;
+                            });
+                        op->data = padded_bl;
+                        auto le = o->extent_map.set_lextent(
+                            static_cast<uint32_t>(offset),
+                            static_cast<uint32_t>(offset - bstart),
+                            static_cast<uint32_t>(length), ep->blob,
+                            &wctx->old_extents);
+                        ep->blob->dirty_blob().mark_used(le->blob_offset,
+                                                         le->length);
+                        return;
+                    }
+                }
+
+                uint64_t b_off_reuse = offset - bstart;
                 uint32_t alloc_len32 = alloc_len;
                 if (ep->blob->can_reuse_blob(min_alloc_size_, max_bsize,
-                                             b_off, &alloc_len32)) {
+                                             b_off_reuse, &alloc_len32)) {
                     o->extent_map.punch_hole(offset, length,
                                              &wctx->old_extents);
 
-                    uint64_t b_off0 = b_off;
+                    uint64_t b_off0 = b_off_reuse;
                     bufferlist padded_bl = bl;
                     _pad_zeros(&padded_bl, &b_off0, chunk_size);
 
                     alloc_len = alloc_len32;
                     wctx->write(offset, ep->blob, alloc_len, b_off0,
-                                padded_bl, b_off, length, false);
+                                padded_bl, b_off_reuse, length, false);
                     return;
                 }
             }
