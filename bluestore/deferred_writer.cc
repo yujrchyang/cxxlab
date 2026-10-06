@@ -1,5 +1,10 @@
 #include "bluestore/deferred_writer.h"
 
+#include <algorithm>
+
+#include "blk/block_device.h"
+#include "bluestore/bluestore_types.h"
+#include "bluestore/trans_context.h"
 #include "common/cassert.h"
 
 namespace TOPNSPC {
@@ -61,6 +66,89 @@ void DeferredBatch::_discard(uint64_t offset, uint64_t length) {
         cxxlab_assert(i->second >= 0);
         p = iomap.erase(p);
     }
+}
+
+DeferredWriter::DeferredWriter(BlockDevice *bdev) : bdev_(bdev) {}
+
+void DeferredWriter::queue(TransContext *txc) {
+    auto *osr = txc->osr;
+    std::unique_lock<std::mutex> l(osr->deferred_lock);
+    if (!osr->deferred_pending) {
+        osr->deferred_pending = new DeferredBatch(osr);
+    }
+    auto *b = osr->deferred_pending;
+    b->txcs.push_back(txc);
+    auto &wt = *txc->deferred_txn;
+    for (auto &op : wt.ops) {
+        uint64_t data_pos = 0;
+        for (auto &e : op.extents) {
+            if (e.offset == bluestore_pextent_t::INVALID_OFFSET) continue;
+            uint64_t write_len =
+                std::min<uint64_t>(e.length, op.data.length() - data_pos);
+            if (write_len == 0) break;
+            b->prepare_write(wt.seq, e.offset, write_len, op.data, data_pos);
+            data_pos += write_len;
+        }
+    }
+    if (!osr->deferred_running) {
+        std::lock_guard<std::mutex> l2(lock_);
+        deferred_queue_.push_back(osr);
+    }
+    l.unlock();
+    try_submit();
+}
+
+void DeferredWriter::try_submit() {
+    std::deque<OpSequencer *> osrs;
+    {
+        std::lock_guard<std::mutex> l(lock_);
+        osrs.swap(deferred_queue_);
+    }
+    for (auto *osr : osrs) {
+        std::unique_lock<std::mutex> l(osr->deferred_lock);
+        if (!osr->deferred_pending || osr->deferred_running) {
+            continue;
+        }
+        auto *b = osr->deferred_pending;
+        osr->deferred_running = b;
+        osr->deferred_pending = nullptr;
+        l.unlock();
+
+        uint64_t start = 0, pos = 0;
+        bufferlist bl;
+        auto i = b->iomap.begin();
+        while (true) {
+            if (i == b->iomap.end() || i->first != pos) {
+                if (bl.length()) {
+                    bdev_->aio_write(start, bl, &b->ioc, false);
+                }
+                if (i == b->iomap.end()) break;
+                start = 0;
+                pos = i->first;
+                bl.clear();
+            }
+            if (!bl.length()) start = pos;
+            pos += i->second.bl.length();
+            bl.claim_append(i->second.bl);
+            ++i;
+        }
+        if (b->ioc.has_pending_aios()) {
+            bdev_->aio_submit(&b->ioc);
+        } else {
+            flush_done(b);
+        }
+    }
+}
+
+void DeferredWriter::flush_done(DeferredBatch *b) {
+    auto *osr = b->osr;
+    if (osr) {
+        std::lock_guard<std::mutex> l(osr->deferred_lock);
+        cxxlab_assert(osr->deferred_running == b);
+        osr->deferred_running = nullptr;
+    }
+    std::lock_guard<std::mutex> l(lock_);
+    deferred_done_queue_.push_back(b);
 }
 
 }  // namespace TOPNSPC

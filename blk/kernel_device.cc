@@ -357,9 +357,8 @@ void KernelDevice::_aio_thread() {
             }
 
             if (ioc->priv && aio_callback) {
-                // callback mode: upper layer manages lifecycle via ioc->priv
                 if (ioc->num_running.fetch_sub(1) == 1)
-                    aio_callback(aio_callback_priv, ioc->priv);
+                    aio_callback(aio_callback_priv, ioc);
             } else {
                 // wait mode: signal the condition variable
                 ioc->try_aio_wake();

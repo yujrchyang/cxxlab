@@ -27,6 +27,8 @@ class KeyValueDB;
 class BlockDevice;
 class FreelistManager;
 class Allocator;
+class DeferredBatch;
+class DeferredWriter;
 
 enum {
     l_bluestore_first = 1,
@@ -247,6 +249,7 @@ private:
     void _deferred_aio_finish(TransContext *txc);
     void _remove_deferred_key(TransContext *txc);
     int _deferred_replay();
+    void _deferred_batch_aio_finish(DeferredBatch *b);
 
     void _buffer_cache_write(TransContext *txc, BlobRef b, uint64_t offset,
                              bufferlist &bl, unsigned flags);
@@ -325,6 +328,7 @@ private:
     std::atomic<uint64_t> deferred_seq_{0};
     std::mutex deferred_lock_;
     std::deque<TransContext *> deferred_queue_;
+    std::unique_ptr<DeferredWriter> deferred_writer_;
 
     std::thread finisher_thread_;
     std::mutex finisher_lock_;

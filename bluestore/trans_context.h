@@ -21,6 +21,7 @@ namespace TOPNSPC {
 class Collection;
 class OpSequencer;
 class Blob;
+class DeferredBatch;
 
 struct TransContext {
     enum state_t : uint8_t {
@@ -166,6 +167,10 @@ public:
 
     uint64_t last_seq = 0;
     std::atomic_int txc_with_unstable_io{0};
+
+    DeferredBatch *deferred_pending = nullptr;
+    DeferredBatch *deferred_running = nullptr;
+    std::mutex deferred_lock;
 };
 
 struct BlueStoreTransaction {

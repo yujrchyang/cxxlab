@@ -11,6 +11,7 @@
 #include "blk/block_device.h"
 #include "bluestore/bitmap_freelist_manager.h"
 #include "bluestore/bluestore_constants.h"
+#include "bluestore/deferred_writer.h"
 #include "bluestore/freelist_manager.h"
 #include "common/denc.h"
 #include "common/object.h"
@@ -468,7 +469,13 @@ int BlueStore::remove_collection(uint64_t coll_id) {
 
 void BlueStore::_aio_callback(void *handle, void *priv) {
     auto *store = static_cast<BlueStore *>(handle);
-    store->txc_aio_finish(priv);
+    auto *ioc = static_cast<IOContext *>(priv);
+    if (ioc->type == 0) {
+        store->txc_aio_finish(ioc->priv);
+    } else {
+        store->_deferred_batch_aio_finish(
+            static_cast<DeferredBatch *>(ioc->priv));
+    }
 }
 
 void BlueStore::txc_aio_finish(void *p) {
@@ -856,6 +863,7 @@ void BlueStore::_kv_start() {
     kv_finalize_stop_ = false;
     kv_sync_in_progress_ = false;
     kv_finalize_in_progress_ = false;
+    deferred_writer_ = std::make_unique<DeferredWriter>(bdev_.get());
 
     kv_sync_thread_ = std::thread([this] { _kv_sync_thread_main(); });
     kv_finalize_thread_ = std::thread([this] { _kv_finalize_thread_main(); });
@@ -874,6 +882,7 @@ void BlueStore::_kv_stop() {
     }
     if (kv_sync_thread_.joinable()) kv_sync_thread_.join();
     if (kv_finalize_thread_.joinable()) kv_finalize_thread_.join();
+    deferred_writer_.reset();
 }
 
 void BlueStore::_kv_sync_thread_main() {
@@ -2208,6 +2217,10 @@ void BlueStore::_deferred_aio_finish(TransContext *txc) {
     _finish_write(txc);
     txc->set_state(TransContext::STATE_DEFERRED_CLEANUP);
     _txc_state_proc(txc);
+}
+
+void BlueStore::_deferred_batch_aio_finish(DeferredBatch *b) {
+    deferred_writer_->flush_done(b);
 }
 
 int BlueStore::_deferred_replay() {
