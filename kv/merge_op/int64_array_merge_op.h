@@ -1,10 +1,11 @@
 #pragma once
 
-#include <algorithm>
 #include <cstdint>
 #include <cstring>
-#include <vector>
+#include <string>
 
+#include "common/byteorder.h"
+#include "common/cassert.h"
 #include "kv/merge_op/merge_op.h"
 
 namespace TOPNSPC {
@@ -23,16 +24,15 @@ public:
                const char *rdata, size_t rlen,
                std::string *new_value) override {
         _record_merge(llen + rlen);
-        size_t count = std::min(llen, rlen) / sizeof(int64_t);
-        std::vector<int64_t> result(count);
+        cxxlab_assert(llen == rlen && llen % sizeof(cxxlab_le64) == 0);
+        *new_value = std::string(ldata, llen);
+        auto *out = reinterpret_cast<cxxlab_le64 *>(new_value->data());
+        const auto *in = reinterpret_cast<const cxxlab_le64 *>(rdata);
+        size_t count = llen / sizeof(cxxlab_le64);
         for (size_t i = 0; i < count; i++) {
-            int64_t existing, delta;
-            memcpy(&existing, ldata + i * sizeof(int64_t), sizeof(int64_t));
-            memcpy(&delta, rdata + i * sizeof(int64_t), sizeof(int64_t));
-            result[i] = existing + delta;
+            out[i] = static_cast<uint64_t>(out[i]) +
+                     static_cast<uint64_t>(in[i]);
         }
-        new_value->assign(reinterpret_cast<char *>(result.data()),
-                          count * sizeof(int64_t));
     }
 };
 

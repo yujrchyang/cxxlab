@@ -437,8 +437,7 @@ TEST_F(MemDBTest, MergeXor) {
 TEST_F(MemDBTest, MergeNoOperatorRegistered) {
     auto t = db->get_transaction();
     t->merge("X", "key", to_bl("data"));
-    int r = db->submit_transaction(t);
-    EXPECT_NE(r, 0);
+    EXPECT_DEATH(db->submit_transaction(t), ".*");
 }
 
 // =====================================================================

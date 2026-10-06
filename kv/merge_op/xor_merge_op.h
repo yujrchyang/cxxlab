@@ -1,9 +1,10 @@
 #pragma once
 
-#include <algorithm>
 #include <cstdint>
-#include <vector>
+#include <cstring>
+#include <string>
 
+#include "common/cassert.h"
 #include "kv/merge_op/merge_op.h"
 
 namespace TOPNSPC {
@@ -22,11 +23,11 @@ public:
                const char *rdata, size_t rlen,
                std::string *new_value) override {
         _record_merge(llen + rlen);
-        size_t count = std::min(llen, rlen);
-        std::vector<char> result(count);
-        for (size_t i = 0; i < count; i++)
-            result[i] = ldata[i] ^ rdata[i];
-        new_value->assign(result.data(), count);
+        cxxlab_assert(llen == rlen);
+        *new_value = std::string(ldata, llen);
+        char *out = new_value->data();
+        for (size_t i = 0; i < llen; i++)
+            out[i] ^= rdata[i];
     }
 };
 

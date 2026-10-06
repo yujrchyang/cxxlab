@@ -23,7 +23,7 @@ PrefixIteratorImpl::PrefixIteratorImpl(WholeSpaceIterator w_iter,
     : w_iter_(std::move(w_iter)),
       prefix_(std::move(prefix)),
       prefix_start_(KeyValueDB::encode_key(prefix_, "")),
-      prefix_next_(prefix_ + static_cast<char>(0xff)) {
+      prefix_next_(prefix_ + static_cast<char>(0x01)) {
     seek_lower_bound_ = prefix_start_;
     seek_upper_bound_ = prefix_next_;
     if (bounds.lower_bound) {

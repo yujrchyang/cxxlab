@@ -43,18 +43,18 @@ public:
         auto key_str = merge_in.key.ToString();
         auto null_pos = key_str.find('\0');
         if (null_pos == std::string::npos)
-            return false;
+            return true;
         std::string prefix = key_str.substr(0, null_pos);
 
         auto mop = find_op(prefix);
         if (!mop)
-            return false;
+            return true;
 
         const ::rocksdb::Slice *existing = merge_in.existing_value;
         const auto &operands = merge_in.operand_list;
 
         if (operands.empty())
-            return false;
+            return true;
 
         if (!existing) {
             mop->merge_nonexistent(operands[0].data(), operands[0].size(),
@@ -142,7 +142,7 @@ struct RocksDBStore::RDBTransactionImpl : public TransactionImpl {
     void rmkeys_by_prefix(
         const std::string &prefix) override {
         auto start = encode_key(prefix, "");
-        auto end = prefix + static_cast<char>(0xff);
+        auto end = prefix + static_cast<char>(0x01);
         if (delete_range_threshold == 0) {
             batch.DeleteRange(start, end);
             return;
@@ -214,28 +214,28 @@ class RocksDBStore::RDBWholeSpaceIteratorImpl
 public:
     RDBWholeSpaceIteratorImpl(::rocksdb::DB *db,
                               ::rocksdb::ReadOptions ropts)
-        : it_(db->NewIterator(ropts)), ropts_(std::move(ropts)) {}
+        : db_(db), ropts_(std::move(ropts)) {}
 
     int seek_to_first() override {
-        apply_bounds();
+        ensure_iterator();
         it_->SeekToFirst();
         return 0;
     }
 
     int seek_to_last() override {
-        apply_bounds();
+        ensure_iterator();
         it_->SeekToLast();
         return 0;
     }
 
     int lower_bound(const std::string &to) override {
-        apply_bounds();
+        ensure_iterator();
         it_->Seek(to);
         return 0;
     }
 
     int upper_bound(const std::string &after) override {
-        apply_bounds();
+        ensure_iterator();
         it_->Seek(after);
         if (it_->Valid() && it_->key() == after)
             it_->Next();
@@ -243,56 +243,67 @@ public:
     }
 
     bool valid() const override {
-        return it_->Valid();
+        return it_ && it_->Valid();
     }
 
     int next() override {
-        if (!it_->Valid()) return -EINVAL;
+        if (!it_ || !it_->Valid()) return -EINVAL;
         it_->Next();
         return it_->status().ok() ? 0 : -EIO;
     }
 
     int prev() override {
-        if (!it_->Valid()) return -EINVAL;
+        if (!it_ || !it_->Valid()) return -EINVAL;
         it_->Prev();
         return it_->status().ok() ? 0 : -EIO;
     }
 
     std::string key() const override {
-        return it_->key().ToString();
+        return it_ ? it_->key().ToString() : std::string{};
     }
 
     bufferlist value() const override {
         bufferlist bl;
-        auto v = it_->value();
-        bl.append(v.data(), static_cast<unsigned>(v.size()));
+        if (it_) {
+            auto v = it_->value();
+            bl.append(v.data(), static_cast<unsigned>(v.size()));
+        }
         return bl;
     }
 
     size_t key_size() const override {
-        return it_->key().size();
+        return it_ ? it_->key().size() : 0;
     }
 
     size_t value_size() const override {
-        return it_->value().size();
+        return it_ ? it_->value().size() : 0;
     }
 
     int status() const override {
-        return it_->status().ok() ? 0 : -EIO;
+        return (it_ && it_->status().ok()) ? 0 : (it_ ? -EIO : -EINVAL);
     }
 
     std::pair<std::string, std::string> raw_key() const override {
-        return decode_key(it_->key().ToString());
+        return it_ ? decode_key(it_->key().ToString())
+                   : std::pair<std::string, std::string>{};
     }
 
     bool raw_key_is_prefixed(
         const std::string &prefix) const override {
+        if (!it_) return false;
         auto [pre, inner] = decode_key(it_->key().ToString());
         (void)inner;
         return pre == prefix;
     }
 
 private:
+    void ensure_iterator() {
+        if (!it_) {
+            apply_bounds();
+            it_.reset(db_->NewIterator(ropts_));
+        }
+    }
+
     void apply_bounds() {
         if (iterate_lower_bound_) {
             lb_slice_ = *iterate_lower_bound_;
@@ -304,10 +315,11 @@ private:
         }
     }
 
-    std::unique_ptr<::rocksdb::Iterator> it_;
+    ::rocksdb::DB *db_;
     ::rocksdb::ReadOptions ropts_;
     ::rocksdb::Slice lb_slice_;
     ::rocksdb::Slice ub_slice_;
+    std::unique_ptr<::rocksdb::Iterator> it_;
 };
 
 // =====================================================================
@@ -528,7 +540,7 @@ void RocksDBStore::compact() {
 
 void RocksDBStore::compact_prefix(const std::string &prefix) {
     auto start = encode_key(prefix, "");
-    auto end = prefix + static_cast<char>(0xff);
+    auto end = prefix + static_cast<char>(0x01);
     ::rocksdb::Slice b(start), e(end);
     auto s = db_->CompactRange(::rocksdb::CompactRangeOptions(), &b, &e);
     (void)s;

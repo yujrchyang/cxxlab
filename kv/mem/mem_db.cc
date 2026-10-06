@@ -12,6 +12,7 @@
 #include <vector>
 
 #include "common/buffer.h"
+#include "common/cassert.h"
 #include "common/common_fwd.h"
 
 namespace TOPNSPC {
@@ -381,7 +382,7 @@ int MemDB::_merge(const std::string &prefix,
             break;
         }
     }
-    if (!mop) return -ENOENT;
+    cxxlab_assert(mop);
 
     std::string rdata = bl.to_str();
     auto it = db_.find(full_key);
