@@ -1,5 +1,6 @@
 #pragma once
 
+#include <atomic>
 #include <map>
 #include <memory>
 #include <mutex>
@@ -62,7 +63,7 @@ private:
 
     mutable std::mutex m_lock_;
     std::map<std::string, std::string> db_;
-    uint64_t seqno_ = 0;
+    std::atomic<uint64_t> seqno_{0};
     std::unique_ptr<PerfCounters> perf_;
 };
 

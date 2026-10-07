@@ -40,11 +40,21 @@ PrefixIteratorImpl::PrefixIteratorImpl(WholeSpaceIterator w_iter,
 }
 
 int PrefixIteratorImpl::seek_to_first() {
-    return w_iter_->lower_bound(prefix_start_);
+    // Use seek_lower_bound_ (accounts for user bounds) instead of
+    // prefix_start_ to avoid skipping past IteratorBounds.lower_bound
+    return w_iter_->lower_bound(seek_lower_bound_);
 }
 
 int PrefixIteratorImpl::seek_to_last() {
-    int r = w_iter_->seek_to_last();
+    // Seek to just past the prefix upper bound, then step back.
+    // This avoids O(n) full-space reverse walk on backends without
+    // persistent upper_bound hint (e.g. MemDB).
+    int r = w_iter_->upper_bound(prefix_next_);
+    if (r != 0) return r;
+    if (w_iter_->valid())
+        return w_iter_->prev();
+    // No keys past prefix_next_, fall back to full-space seek_to_last
+    r = w_iter_->seek_to_last();
     if (r != 0) return r;
     while (w_iter_->valid() &&
            !w_iter_->raw_key_is_prefixed(prefix_))
@@ -59,6 +69,9 @@ int PrefixIteratorImpl::lower_bound(const std::string &to) {
 int PrefixIteratorImpl::upper_bound(const std::string &after) {
     upper_bound_ = after;
     upper_bound_set_ = true;
+    // Update persistent hint so backends (RocksDB) clamp scan range
+    seek_upper_bound_ = prefix_start_ + after;
+    w_iter_->set_iterate_upper_bound(&seek_upper_bound_);
     int r = w_iter_->lower_bound(prefix_start_ + after);
     if (r != 0) return r;
     if (w_iter_->valid()) {
@@ -111,8 +124,10 @@ int KeyValueDB::get(const std::string &prefix,
     int r = get(prefix, keys, &result);
     if (r != 0) return r;
     auto it = result.find(key);
-    if (it == result.end())
+    if (it == result.end()) {
+        *out = bufferlist();
         return -ENOENT;
+    }
     *out = it->second;
     return 0;
 }

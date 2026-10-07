@@ -33,7 +33,6 @@ public:
         merge_bytes_.store(0, std::memory_order_relaxed);
     }
 
-protected:
     void _record_merge(size_t bytes) {
         merge_count_.fetch_add(1, std::memory_order_relaxed);
         merge_bytes_.fetch_add(bytes, std::memory_order_relaxed);

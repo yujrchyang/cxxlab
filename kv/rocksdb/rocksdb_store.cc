@@ -4,6 +4,7 @@
 
 #include "kv/rocksdb/rocksdb_store.h"
 
+#include <algorithm>
 #include <cerrno>
 #include <cstddef>
 #include <cstring>
@@ -34,9 +35,22 @@ public:
         std::vector<std::pair<std::string,
                               std::shared_ptr<KvMergeOp>>>
             ops)
-        : merge_ops_(std::move(ops)) {}
+        : merge_ops_(std::move(ops)) {
+        // Build name from sorted prefix:op->name() pairs so RocksDB
+        // detects merge operator config changes on reopen.
+        std::vector<std::pair<std::string, const char *>> sorted;
+        for (auto &[p, op] : merge_ops_)
+            sorted.emplace_back(p, op->name());
+        std::sort(sorted.begin(), sorted.end());
+        for (size_t i = 0; i < sorted.size(); i++) {
+            if (i > 0) name_cache_ += ",";
+            name_cache_ += sorted[i].first;
+            name_cache_ += ":";
+            name_cache_ += sorted[i].second;
+        }
+    }
 
-    const char *Name() const override { return "cxxlab_kv_merge_adapter"; }
+    const char *Name() const override { return name_cache_.c_str(); }
 
     bool FullMergeV2(const MergeOperationInput &merge_in,
                      MergeOperationOutput *merge_out) const override {
@@ -59,23 +73,27 @@ public:
         if (!existing) {
             mop->merge_nonexistent(operands[0].data(), operands[0].size(),
                                    &merge_out->new_value);
+            mop->_record_merge(operands[0].size());
             for (size_t i = 1; i < operands.size(); i++) {
                 std::string tmp;
                 mop->merge(merge_out->new_value.data(),
                            merge_out->new_value.size(),
                            operands[i].data(), operands[i].size(), &tmp);
                 merge_out->new_value = std::move(tmp);
+                mop->_record_merge(operands[i].size());
             }
         } else {
             mop->merge(existing->data(), existing->size(),
                        operands[0].data(), operands[0].size(),
                        &merge_out->new_value);
+            mop->_record_merge(existing->size() + operands[0].size());
             for (size_t i = 1; i < operands.size(); i++) {
                 std::string tmp;
                 mop->merge(merge_out->new_value.data(),
                            merge_out->new_value.size(),
                            operands[i].data(), operands[i].size(), &tmp);
                 merge_out->new_value = std::move(tmp);
+                mop->_record_merge(operands[i].size());
             }
         }
         return true;
@@ -103,6 +121,7 @@ private:
 
     std::vector<std::pair<std::string, std::shared_ptr<KvMergeOp>>>
         merge_ops_;
+    std::string name_cache_;
 };
 
 // =====================================================================
@@ -155,7 +174,7 @@ struct RocksDBStore::RDBTransactionImpl : public TransactionImpl {
         ::rocksdb::Slice ub(end);
         ropts.iterate_lower_bound = &lb;
         ropts.iterate_upper_bound = &ub;
-        auto it = db->NewIterator(ropts);
+        auto it = std::unique_ptr<::rocksdb::Iterator>(db->NewIterator(ropts));
         for (it->SeekToFirst(); it->Valid() && (--cnt) != 0; it->Next()) {
             batch.Delete(it->key());
         }
@@ -184,7 +203,7 @@ struct RocksDBStore::RDBTransactionImpl : public TransactionImpl {
         ::rocksdb::Slice ub(e);
         ropts.iterate_lower_bound = &lb;
         ropts.iterate_upper_bound = &ub;
-        auto it = db->NewIterator(ropts);
+        auto it = std::unique_ptr<::rocksdb::Iterator>(db->NewIterator(ropts));
         for (it->Seek(s); it->Valid() && it->key().compare(e) < 0 && (--cnt) != 0;
              it->Next()) {
             batch.Delete(it->key());
@@ -219,19 +238,19 @@ public:
     int seek_to_first() override {
         ensure_iterator();
         it_->SeekToFirst();
-        return 0;
+        return it_->status().ok() ? 0 : -EIO;
     }
 
     int seek_to_last() override {
         ensure_iterator();
         it_->SeekToLast();
-        return 0;
+        return it_->status().ok() ? 0 : -EIO;
     }
 
     int lower_bound(const std::string &to) override {
         ensure_iterator();
         it_->Seek(to);
-        return 0;
+        return it_->status().ok() ? 0 : -EIO;
     }
 
     int upper_bound(const std::string &after) override {
@@ -239,7 +258,7 @@ public:
         it_->Seek(after);
         if (it_->Valid() && it_->key() == after)
             it_->Next();
-        return 0;
+        return it_->status().ok() ? 0 : -EIO;
     }
 
     bool valid() const override {
@@ -259,7 +278,8 @@ public:
     }
 
     std::string key() const override {
-        return it_ ? it_->key().ToString() : std::string{};
+        if (!it_) return {};
+        return decode_key(it_->key().ToString()).second;
     }
 
     bufferlist value() const override {
@@ -331,10 +351,10 @@ RocksDBStore::RocksDBStore(
     std::map<std::string, std::string> options)
     : dir_(dir), options_(std::move(options)) {}
 
-static void parse_options(const std::string &str,
-                          ::rocksdb::Options &opts) {
+static int parse_options(const std::string &str,
+                         ::rocksdb::Options &opts) {
     if (str.empty())
-        return;
+        return 0;
     std::istringstream ss(str);
     std::string kv;
     while (std::getline(ss, kv, ';')) {
@@ -343,25 +363,36 @@ static void parse_options(const std::string &str,
             continue;
         std::string key = kv.substr(0, eq);
         std::string value = kv.substr(eq + 1);
-        if (key == "write_buffer_size")
-            opts.write_buffer_size = std::stoul(value);
-        else if (key == "max_write_buffer_number")
-            opts.max_write_buffer_number = std::stoul(value);
-        else if (key == "min_write_buffer_number_to_merge")
-            opts.min_write_buffer_number_to_merge = std::stoul(value);
-        else if (key == "max_bytes_for_level_base")
-            opts.max_bytes_for_level_base = std::stoull(value);
-        else if (key == "target_file_size_base")
-            opts.target_file_size_base = std::stoull(value);
-        // add more options as needed
+        try {
+            if (key == "write_buffer_size")
+                opts.write_buffer_size = std::stoul(value);
+            else if (key == "max_write_buffer_number")
+                opts.max_write_buffer_number = std::stoul(value);
+            else if (key == "min_write_buffer_number_to_merge")
+                opts.min_write_buffer_number_to_merge = std::stoul(value);
+            else if (key == "max_bytes_for_level_base")
+                opts.max_bytes_for_level_base = std::stoull(value);
+            else if (key == "target_file_size_base")
+                opts.target_file_size_base = std::stoull(value);
+        } catch (const std::exception &) {
+            return -EINVAL;
+        }
     }
+    return 0;
 }
 
 int RocksDBStore::init(const std::string &options_str) {
-    parse_options(options_str, cached_opts_);
+    int r = parse_options(options_str, cached_opts_);
+    if (r < 0)
+        return r;
     for (auto &[k, v] : options_) {
-        if (k == "delete_range_threshold")
-            delete_range_threshold_ = std::stoul(v);
+        if (k == "delete_range_threshold") {
+            try {
+                delete_range_threshold_ = std::stoul(v);
+            } catch (const std::exception &) {
+                return -EINVAL;
+            }
+        }
     }
     return 0;
 }
@@ -373,9 +404,7 @@ void RocksDBStore::setup_merge_adapter(::rocksdb::Options &opts) {
     }
 }
 
-int RocksDBStore::open_db(::rocksdb::Options opts,
-                          std::ostream &out) {
-    // Apply cached options from init()
+void RocksDBStore::apply_cached_opts(::rocksdb::Options &opts) {
     opts.write_buffer_size = cached_opts_.write_buffer_size;
     opts.max_write_buffer_number = cached_opts_.max_write_buffer_number;
     opts.min_write_buffer_number_to_merge =
@@ -383,7 +412,12 @@ int RocksDBStore::open_db(::rocksdb::Options opts,
     opts.max_bytes_for_level_base =
         cached_opts_.max_bytes_for_level_base;
     opts.target_file_size_base = cached_opts_.target_file_size_base;
+}
 
+int RocksDBStore::open_db(::rocksdb::Options opts,
+                          std::ostream &out) {
+    // Apply cached options from init()
+    apply_cached_opts(opts);
     setup_merge_adapter(opts);
 
     ::rocksdb::Status s = ::rocksdb::DB::Open(opts, dir_, &db_);
@@ -409,6 +443,7 @@ int RocksDBStore::create_and_open(std::ostream &out) {
 
 int RocksDBStore::open_read_only(std::ostream &out) {
     ::rocksdb::Options opts;
+    apply_cached_opts(opts);
     setup_merge_adapter(opts);
     auto s = ::rocksdb::DB::OpenForReadOnly(opts, dir_, &db_);
     if (!s.ok()) {
@@ -421,7 +456,10 @@ int RocksDBStore::open_read_only(std::ostream &out) {
 }
 
 int RocksDBStore::repair(std::ostream &out) {
-    auto s = ::rocksdb::RepairDB(dir_, ::rocksdb::Options());
+    ::rocksdb::Options opts;
+    apply_cached_opts(opts);
+    setup_merge_adapter(opts);
+    auto s = ::rocksdb::RepairDB(dir_, opts);
     if (!s.ok()) {
         out << "RocksDB repair failed: " << s.ToString() << std::endl;
         return -EIO;
@@ -514,6 +552,8 @@ int RocksDBStore::get(
             bl.append(values[i].data(),
                       static_cast<unsigned>(values[i].size()));
             (*out)[*kit] = std::move(bl);
+        } else if (statuses[i].IsIOError()) {
+            return -EIO;
         }
         ++kit;
         ++i;

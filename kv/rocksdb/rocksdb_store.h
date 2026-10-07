@@ -19,6 +19,7 @@ class RocksDBStore : public KeyValueDB {
 public:
     RocksDBStore(const std::string &dir,
                  std::map<std::string, std::string> options);
+    ~RocksDBStore() override { close(); }
 
     int init(const std::string &options_str) override;
     int open(std::ostream &out) override;
@@ -61,6 +62,7 @@ private:
 
     // ── Helpers ─────────────────────────────────────────────
     int open_db(rocksdb::Options opts, std::ostream &out);
+    void apply_cached_opts(::rocksdb::Options &opts);
     void setup_merge_adapter(::rocksdb::Options &opts);
     void _init_perf();
     void _shutdown_perf();

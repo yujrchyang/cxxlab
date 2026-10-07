@@ -177,31 +177,15 @@ public:
 
 private:
     void refresh() {
-        uint64_t cur = db_->seqno_;
+        uint64_t cur = db_->seqno_.load(std::memory_order_acquire);
         if (cur == seqno_)
             return;
         seqno_ = cur;
-        std::string current_key;
-        if (pos_ >= 0 &&
-            static_cast<size_t>(pos_) < items_.size())
-            current_key = items_[pos_].first;
-        {
-            std::lock_guard<std::mutex> lock(db_->m_lock_);
-            items_.clear();
-            items_.reserve(db_->db_.size());
-            for (auto &[k, v] : db_->db_)
-                items_.emplace_back(k, v);
-        }
-        if (!current_key.empty()) {
-            auto it = std::lower_bound(
-                items_.begin(), items_.end(), current_key,
-                [](const auto &pair, const std::string &key) {
-                    return pair.first < key;
-                });
-            pos_ = static_cast<ptrdiff_t>(it - items_.begin());
-            if (static_cast<size_t>(pos_) >= items_.size())
-                pos_ = -1;
-        }
+        std::lock_guard<std::mutex> lock(db_->m_lock_);
+        items_.clear();
+        items_.reserve(db_->db_.size());
+        for (auto &[k, v] : db_->db_)
+            items_.emplace_back(k, v);
     }
 
     const MemDB *db_;
@@ -262,9 +246,8 @@ int MemDB::submit_transaction(Transaction t) {
             break;
         case OpType::MERGE: {
             if (perf_) perf_->inc(l_kv_merge_count);
-            int r = _merge(op.prefix, encode_key(op.prefix, op.key),
-                           op.value);
-            if (r) return r;
+            _merge(op.prefix, encode_key(op.prefix, op.key),
+                   op.value);
             break;
         }
         }
@@ -306,7 +289,7 @@ WholeSpaceIterator MemDB::get_wholespace_iterator(
     for (auto &[k, v] : db_)
         items.emplace_back(k, v);
     return std::make_unique<MDBWholeSpaceIteratorImpl>(
-        this, std::move(items), seqno_);
+        this, std::move(items), seqno_.load(std::memory_order_acquire));
 }
 
 void MemDB::compact() {}

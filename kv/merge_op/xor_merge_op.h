@@ -11,7 +11,7 @@ namespace TOPNSPC {
 
 class XorMergeOperator : public MergeOperator {
 public:
-    const char *name() const override { return "xor"; }
+    const char *name() const override { return "bitwise_xor"; }
 
     void merge_nonexistent(const char *rdata, size_t rlen,
                            std::string *new_value) override {
