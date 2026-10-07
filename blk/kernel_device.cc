@@ -2,6 +2,7 @@
 
 #include <algorithm>
 #include <cerrno>
+#include <cstring>
 
 #include <fcntl.h>
 #include <linux/fs.h>
@@ -11,6 +12,7 @@
 
 #include "blk/aio.h"
 #include "blk/io_context.h"
+#include "common/cassert.h"
 
 namespace TOPNSPC {
 
@@ -55,8 +57,10 @@ bool _is_rotational(int fd) {
 
 bool _supports_discard(int fd) {
 #ifdef BLKDISCARD
-    int r = ::ioctl(fd, BLKDISCARD, nullptr);
-    return r != -ENOTTY;
+    // 用零长度 range 探测：不下发真实 discard，r==0 表示支持
+    uint64_t range[2] = {0, 0};
+    int r = ::ioctl(fd, BLKDISCARD, &range);
+    return r == 0;
 #else
     return false;
 #endif
@@ -168,6 +172,24 @@ int KernelDevice::read_random(uint64_t off, uint64_t len, char *buf,
     int fd = buffered ? fd_buffered_ : fd_direct_;
     if (fd < 0)
         return -EBADF;
+
+    // O_DIRECT 未对齐读：对齐读整块后 memcpy 子集
+    if (!buffered && (off & (block_size - 1) || len & (block_size - 1))) {
+        uint64_t aligned_off = off & ~static_cast<uint64_t>(block_size - 1);
+        uint64_t aligned_end =
+            (off + len + block_size - 1) & ~static_cast<uint64_t>(block_size - 1);
+        uint64_t aligned_len = aligned_end - aligned_off;
+
+        auto aligned_buf =
+            TOPNSPC::buffer::create_aligned(aligned_len, block_size);
+        int r = ::pread(fd, aligned_buf->get_data(), aligned_len, aligned_off);
+        if (r < 0)
+            return -errno;
+        if (uint64_t(r) < (off - aligned_off) + len)
+            return -EIO;
+        memcpy(buf, aligned_buf->get_data() + (off - aligned_off), len);
+        return len;
+    }
 
     int r = ::pread(fd, buf, len, off);
     if (r < 0)
@@ -287,8 +309,12 @@ void KernelDevice::aio_submit(IOContext *ioc) {
     int retries = 16;
     int r = io_queue_->submit_batch(ioc->running_aios.begin(), old_begin,
                                     ioc, &retries);
-    if (r < 0)
+    if (r < 0) {
+        // 提交失败（EAGAIN 耗尽或非 EAGAIN 错误）：fail-fast 对齐 Ceph
+        // 防止未提交 aio 留在 running_aios 导致 num_running 永不归零 → aio_wait 死锁
         ioc->set_return_value(r);
+        cxxlab_assert(false);
+    }
 }
 
 // ---------------------------------------------------------------------------
@@ -347,13 +373,9 @@ void KernelDevice::_aio_thread() {
                 continue;
 
             long res = aios[i]->get_return_value();
-            if (res < 0) {
+            if (res < 0 || (uint64_t)res != aios[i]->length) {
                 ioc->set_return_value(-EIO);
-                continue;
-            }
-            if ((uint64_t)res != aios[i]->length) {
-                ioc->set_return_value(-EIO);
-                continue;
+                // 不 continue，fall-through 到 num_running 递减 + 唤醒/回调
             }
 
             if (ioc->priv && aio_callback) {

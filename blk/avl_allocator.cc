@@ -122,10 +122,11 @@ void AvlAllocator::_add_to_tree(uint64_t start, uint64_t size) {
 }
 
 void AvlAllocator::_spillover_range(uint64_t start, uint64_t end) {
+    // Base class cannot handle spillover: must be overridden by HybridAllocator.
+    // Directly constructing AvlAllocator with a small max_mem will trigger this.
     (void)start;
     (void)end;
-    // No-op in the base class: overflows are silently dropped.
-    // Subclasses (HybridAllocator) redirect to a fallback allocator.
+    cxxlab_assert(false);
 }
 
 void AvlAllocator::_process_range_removal(uint64_t start, uint64_t end,
@@ -154,17 +155,16 @@ void AvlAllocator::_process_range_removal(uint64_t start, uint64_t end,
     }
 }
 
-bool AvlAllocator::_remove_from_tree(uint64_t start, uint64_t size) {
+void AvlAllocator::_remove_from_tree(uint64_t start, uint64_t size) {
     uint64_t end = start + size;
     cxxlab_assert(size != 0);
 
     auto rs = range_tree_.find(range_t{start, end}, range_tree_.key_comp());
-    if (rs == range_tree_.end() || rs->start > start || rs->end < end)
-        return false;
+    cxxlab_assert(rs != range_tree_.end() && rs->start <= start &&
+                  rs->end >= end);
     cxxlab_assert(size <= num_free_);
 
     _process_range_removal(start, end, rs);
-    return true;
 }
 
 void AvlAllocator::_range_size_tree_rm(range_seg_t &r) {

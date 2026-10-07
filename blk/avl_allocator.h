@@ -147,7 +147,7 @@ protected:
 
     /// Internal helpers (also accessible to subclasses for customization)
     /// Returns false if the range is not present in the AVL tree.
-    bool _remove_from_tree(uint64_t start, uint64_t size);
+    void _remove_from_tree(uint64_t start, uint64_t size);
     void _process_range_removal(uint64_t start, uint64_t end,
                                 range_tree_t::iterator &rs);
     void _range_size_tree_rm(range_seg_t &r);

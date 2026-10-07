@@ -15,15 +15,20 @@ struct pextent_t {
     uint32_t length = 0;
 
     pextent_t() = default;
-    pextent_t(uint64_t o, uint32_t l) : offset(o), length(l) {}
+    pextent_t(uint64_t o, uint64_t l)
+        : offset(o), length(static_cast<uint32_t>(l)) {}
 
     bool is_valid() const { return offset != INVALID_OFFSET; }
+    uint64_t end() const {
+        return offset != INVALID_OFFSET ? offset + length : INVALID_OFFSET;
+    }
+    bool operator==(const pextent_t &o) const {
+        return offset == o.offset && length == o.length;
+    }
 
     DENC(pextent_t, v, p) {
-        DENC_START(1, 1, p);
-        denc(v.offset, p);
-        denc(v.length, p);
-        DENC_FINISH(p);
+        denc_lba(v.offset, p);
+        denc_varint_lowz(v.length, p);
     }
 };
 
@@ -39,7 +44,7 @@ struct denc_traits<PExtentVector> {
     static constexpr bool need_contiguous = true;
 
     static void bound_encode(const PExtentVector &v, size_t &p) {
-        p += sizeof(uint32_t);
+        denc_varint(static_cast<uint32_t>(v.size()), p);
         if (!v.empty()) {
             size_t elem_size = 0;
             denc(v.front(), elem_size);
@@ -49,7 +54,7 @@ struct denc_traits<PExtentVector> {
 
     static void encode(const PExtentVector &v,
                        buffer::list::contiguous_appender &p) {
-        denc(static_cast<uint32_t>(v.size()), p);
+        denc_varint(static_cast<uint32_t>(v.size()), p);
         for (const auto &e : v) {
             denc(e, p);
         }
@@ -57,7 +62,7 @@ struct denc_traits<PExtentVector> {
 
     static void decode(PExtentVector &v, buffer::ptr::const_iterator &p) {
         uint32_t num;
-        denc(num, p);
+        denc_varint(num, p);
         v.clear();
         v.resize(num);
         for (uint32_t i = 0; i < num; ++i) {

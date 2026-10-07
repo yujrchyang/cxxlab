@@ -238,10 +238,10 @@ TEST_F(BitmapAllocatorTest, InitRmFreeThenAlloc) {
         for (auto &e : extents)
             total += e.length;
     }
-    // BitmapAllocator L2 granularity is ~512MB for a 1GB device with 4KB alloc_unit.
-    // init_rm_free clears the L2 bit for the first 512MB chunk (even though only
-    // 40KB was removed), so only the second fully-free 512MB chunk is allocable.
-    EXPECT_EQ(total, 512ULL * 1024 * 1024);
+    // After _mark_allocated fix (using _mark_l2_on_l1 instead of
+    // _mark_l2_allocated), L2 bits are correctly recomputed from L1 state.
+    // Only the 40KB (10 * ALLOC_UNIT) removed by init_rm_free is unavailable.
+    EXPECT_EQ(total, DEV_SIZE - ALLOC_UNIT * 10);
 }
 
 TEST_F(BitmapAllocatorTest, AllocZeroWant) {

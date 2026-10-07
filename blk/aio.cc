@@ -50,7 +50,7 @@ int aio_queue_t::init(std::vector<int> &) {
     int r = io_setup(max_iodepth, &ctx);
     if (r < 0) {
         ctx = nullptr;
-        return -r;
+        return r;
     }
     return 0;
 }
@@ -87,8 +87,20 @@ int aio_queue_t::submit_batch(aio_iter begin, aio_iter end,
                 delay_us *= 2;
                 continue;
             }
-            if (r == 0)
-                r = -err;
+            // 出错即返回负错误（不论之前已提交多少），防止调用方漏判
+            r = -err;
+            break;
+        }
+        if (submitted == 0) {
+            // io_submit 返回 0：当 EAGAIN 退避重试，防止无限自旋
+            if (attempts > 0) {
+                --attempts;
+                ++(*retries);
+                usleep(delay_us);
+                delay_us *= 2;
+                continue;
+            }
+            r = -EAGAIN;
             break;
         }
         p += submitted;

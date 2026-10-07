@@ -5,6 +5,7 @@
 #include "blk/avl_allocator.h"
 #include "blk/bitmap_allocator.h"
 #include "blk/hybrid_allocator.h"
+#include "common/cassert.h"
 #include "common/intarith.h"
 
 namespace TOPNSPC {
@@ -61,6 +62,7 @@ double Allocator::get_fragmentation_score() {
 
     foreach ([&](uint64_t off, uint64_t len) {
         (void)off;
+        cxxlab_assert(len > 0);
         score_sum += get_score(len);
         sum += len;
     })

@@ -308,7 +308,7 @@ int AllocatorLevel01Loose::_allocate_l0(
         uint64_t run_start = p / bits_per_slot * bits_per_slot + bit;
         uint64_t run_end = run_start;
 
-        while (run_end - run_start < need) {
+        while (run_end - run_start < need && run_end < l0_end) {
             auto &s2 = l0[run_end / bits_per_slot];
             int64_t nxt = find_next_set_bit(s2, run_end % bits_per_slot);
             if (nxt == int64_t(run_end % bits_per_slot)) {
@@ -505,7 +505,7 @@ void AllocatorLevel02::_mark_allocated(uint64_t offset, uint64_t length) {
     l1._mark_alloc_l1_l0(l0s, l0e);
     uint64_t l2p = offset / l2_granularity;
     uint64_t l2e = round_up(offset + length, l2_granularity) / l2_granularity;
-    _mark_l2_allocated(l2p, l2e);
+    _mark_l2_on_l1(l2p, l2e);
     cxxlab_assert(available >= length);
     available -= length;
 }
@@ -526,8 +526,8 @@ int AllocatorLevel02::_allocate_l2(
     uint64_t want, uint64_t min_length, uint64_t max_length,
     int64_t hint, uint64_t *allocated, PExtentVector *res) {
     std::lock_guard l(lock);
-    if (max_length == 0)
-        max_length = std::numeric_limits<uint32_t>::max();
+    if (max_length == 0 || max_length >= (1ull << 31))
+        max_length = 1ull << 31;
     max_length = align_down(max_length, min_length);
     if (max_length < min_length)
         max_length = min_length;
@@ -536,6 +536,10 @@ int AllocatorLevel02::_allocate_l2(
     int64_t pos = 0;
     if (hint > 0) {
         pos = align_down(hint / l2_granularity, d);
+        if (uint64_t(pos) >= l2.size() * d) pos = 0;
+    } else {
+        // hint==0: use last_pos as scan start for arena rotation
+        pos = last_pos;
         if (uint64_t(pos) >= l2.size() * d) pos = 0;
     }
 
@@ -823,6 +827,7 @@ void BitmapAllocator::init_add_free(uint64_t offset, uint64_t length) {
     uint64_t off = round_up(offset, impl_->l1.l0_granularity);
     length = align_down(offset + length - off, impl_->l1.l0_granularity);
     if (length == 0) return;
+    cxxlab_assert(off + length <= uint64_t(device_size));
     impl_->_mark_free(off, length);
 }
 
@@ -832,6 +837,7 @@ void BitmapAllocator::init_rm_free(uint64_t offset, uint64_t length) {
     uint64_t off = round_up(offset, impl_->l1.l0_granularity);
     length = align_down(offset + length - off, impl_->l1.l0_granularity);
     if (length == 0) return;
+    cxxlab_assert(off + length <= uint64_t(device_size));
     impl_->_mark_allocated(off, length);
 }
 

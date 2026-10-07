@@ -10,6 +10,10 @@ namespace TOPNSPC {
 // Utilities
 // ---------------------------------------------------------------------------
 bool BlockDevice::is_valid_io(uint64_t off, uint64_t len) const {
+    if (len == 0)
+        return false;
+    if (off >= size)
+        return false;
     if (off + len < off)
         return false;
     if (off + len > size)

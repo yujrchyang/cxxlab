@@ -12,6 +12,7 @@ void IOContext::aio_wait() {
 
 void IOContext::try_aio_wake() {
     std::lock_guard l(lock);
+    cxxlab_assert(num_running.load() >= 1);
     if (num_running.fetch_sub(1) == 1)
         cond.notify_all();
 }
