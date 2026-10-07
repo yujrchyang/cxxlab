@@ -1237,7 +1237,7 @@ Ceph 参考: `BlueStore.h:2069-2095`（DeferredBatch）、`BlueStore.cc:3879-389
 
 ---
 
-## 阶段七：Ceph 源码对比验证 [ ]
+## 阶段七：Ceph 源码对比验证 [✅]
 
 > 目标：以模块为单位，将 cxxlab 实现与 Ceph 参考源码（`/home/yujrchyang/opensrc/ceph/`）逐项对比，确认实现无遗漏、无偏差。
 > 前置条件：阶段一至六功能实现完成，进入对比验证阶段。
@@ -1441,4 +1441,4 @@ Ceph 参考: `BlueStore.h:2069-2095`（DeferredBatch）、`BlueStore.cc:3879-389
 
 ## 下一步
 
-阶段一至六功能实现全部完成。阶段七 Ceph 源码对比验证（7.1-7.6）待执行，按 common → blk → kv → bluefs → bluestore 顺序逐模块对比。缓做项: ReadPipeline、TransContext 状态机、can_reuse_blob 对齐移除（保留，合理防御）。
+阶段一至七全部完成。阶段七 Ceph 源码对比验证（7.1-7.5）已执行，5 个模块共修复 89 项（高危+中危），保持现状约 182 项（序列化不兼容/设计选择/有意裁剪/测试覆盖缺口）。7.6 btier 无 Ceph 对应，跳过。缓做项: ReadPipeline、TransContext 状态机、can_reuse_blob 对齐移除（保留，合理防御）。
