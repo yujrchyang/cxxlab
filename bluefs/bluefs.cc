@@ -1,6 +1,7 @@
 #include "bluefs/bluefs.h"
 
 #include <cerrno>
+#include <iostream>
 
 #include "blk/block_device.h"
 #include "common/buffer_error.h"
@@ -246,7 +247,16 @@ int BlueFS::_allocate(uint8_t prefer_bdev, uint64_t len, uint64_t alloc_unit,
         int64_t alloc_len = alloc_[id]->allocate(need, alloc_unit, 0,
                                                  hint_val, &extents);
 
-        if (alloc_len <= 0) continue;
+        if (alloc_len < 0 || uint64_t(alloc_len) < need) {
+            // Partial allocation or failure: release and fall back
+            if (alloc_len > 0) {
+                alloc_[id]->release(extents);
+                if (is_shared_alloc(id) && shared_alloc_) {
+                    shared_alloc_->bluefs_used -= alloc_len;
+                }
+            }
+            continue;
+        }
 
         if (is_shared_alloc(id) && shared_alloc_) {
             shared_alloc_->bluefs_used += alloc_len;
@@ -479,9 +489,14 @@ int BlueFS::_flush_log_data(bufferlist &bl) {
         x_off = 0;
         ++it;
     }
-    log_.writer->pos += bl.length();
+    uint64_t written = bl.length() - remaining;
+    log_.writer->pos += written;
     if (log_.writer->pos > fnode.size) {
         fnode.size = log_.writer->pos;
+    }
+    if (remaining > 0) {
+        // extent exhausted with data remaining — not silent success
+        return -ENOSPC;
     }
     return 0;
 }
@@ -493,7 +508,21 @@ int BlueFS::_flush_log_data(bufferlist &bl) {
 void BlueFS::_signal_dirty_to_log(FileWriter *h) {
     std::lock_guard l(dirty_.lock);
     auto &f = h->file;
-    if (f->dirty_seq <= dirty_.seq_stable || f->dirty_seq == 0) {
+    if (f->deleted) return;
+    if (f->dirty_seq > dirty_.seq_stable &&
+        f->dirty_seq != dirty_.seq_live) {
+        // re-dirty: move from old seq batch to current seq_live
+        auto it = dirty_.files.find(f->dirty_seq);
+        if (it != dirty_.files.end()) {
+            auto &vec = it->second;
+            vec.erase(std::remove(vec.begin(), vec.end(), f),
+                      vec.end());
+            if (vec.empty()) dirty_.files.erase(it);
+        }
+        f->dirty_seq = dirty_.seq_live;
+        dirty_.files[dirty_.seq_live].push_back(f);
+    } else if (f->dirty_seq <= dirty_.seq_stable ||
+               f->dirty_seq == 0) {
         f->dirty_seq = dirty_.seq_live;
         dirty_.files[dirty_.seq_live].push_back(f);
     }
@@ -779,9 +808,6 @@ int BlueFS::_replay(bool no_stdout) {
                     file->vselector_hint =
                         vselector_->get_hint_by_dir(dirname);
                     vselector_->add_usage(file->vselector_hint, file->fnode);
-                } else {
-                    file->vselector_hint =
-                        vselector_->get_hint_by_dir(dirname);
                 }
                 std::lock_guard l(nodes_.lock);
                 auto dit = nodes_.dir_map.find(dirname);
@@ -1022,7 +1048,8 @@ void BlueFS::umount(bool avoid_compact) {
         super_.log_fnode = _get_file(1)->fnode;
         int r = _write_super(BDEV_DB);
         if (r < 0) {
-            // Log failure but continue cleanup
+            std::cerr << "BlueFS::umount: _write_super failed: "
+                      << r << std::endl;
         }
         _close_writer(log_.writer);
         log_.writer = nullptr;
@@ -1070,13 +1097,13 @@ int BlueFS::fsync(FileWriter *h) {
     int r = _flush_F(h, true);
     if (r < 0) return r;
     _flush_bdev(h);
-    if (h->file->is_dirty) {
-        _signal_dirty_to_log(h);
-        h->file->is_dirty = false;
-    }
-    uint64_t old_dirty_seq = 0;
+    uint64_t old_dirty_seq;
     {
-        std::lock_guard l(dirty_.lock);
+        std::unique_lock hl(h->lock);
+        if (h->file->is_dirty) {
+            _signal_dirty_to_log(h);
+            h->file->is_dirty = false;
+        }
         old_dirty_seq = h->file->dirty_seq;
     }
     if (dirty_.seq_stable < old_dirty_seq) {
@@ -1231,6 +1258,7 @@ int BlueFS::stat(std::string_view dirname, std::string_view filename,
 }
 
 void BlueFS::_drop_link(FileRef file) {
+    cxxlab_assert(file->refs > 0);
     --file->refs;
     if (file->refs == 0) {
         if (vselector_) {

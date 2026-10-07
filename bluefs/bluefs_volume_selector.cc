@@ -5,6 +5,8 @@
 #include <cstdint>
 #include <cstring>
 
+#include "common/cassert.h"
+
 namespace TOPNSPC {
 
 // =========================================================================
@@ -176,6 +178,7 @@ void RocksDBBlueFSVolumeSelector::update_max(uint8_t bdev, uint8_t level) {
 void RocksDBBlueFSVolumeSelector::add_usage(void *hint,
                                             const bluefs_extent_t &extent) {
     if (hint == nullptr) return;
+    cxxlab_assert(extent.bdev < BDEVS);
     size_t pos = reinterpret_cast<size_t>(hint) - RDB_LEVEL_FIRST;
     usage_[extent.bdev][pos].fetch_add(extent.length);
     update_max(extent.bdev, pos);
@@ -187,10 +190,13 @@ void RocksDBBlueFSVolumeSelector::add_usage(void *hint,
 void RocksDBBlueFSVolumeSelector::sub_usage(void *hint,
                                             const bluefs_extent_t &extent) {
     if (hint == nullptr) return;
+    cxxlab_assert(extent.bdev < BDEVS);
     size_t pos = reinterpret_cast<size_t>(hint) - RDB_LEVEL_FIRST;
     auto &cur = usage_[extent.bdev][pos];
+    cxxlab_assert(cur.load() >= extent.length);
     cur -= extent.length;
     // per-device totals
+    cxxlab_assert(usage_[extent.bdev][LEVELS - 1].load() >= extent.length);
     usage_[extent.bdev][LEVELS - 1] -= extent.length;
 }
 
@@ -213,14 +219,18 @@ void RocksDBBlueFSVolumeSelector::sub_usage(void *hint, uint64_t fsize,
                                             bool upd_files) {
     if (hint == nullptr) return;
     size_t pos = reinterpret_cast<size_t>(hint) - RDB_LEVEL_FIRST;
+    cxxlab_assert(usage_[MAX_BDEV][pos].load() >= fsize);
     usage_[MAX_BDEV][pos] -= fsize;
     if (upd_files) {
+        cxxlab_assert(per_level_files_[pos] > 0);
         --per_level_files_[pos];
+        cxxlab_assert(per_level_files_[LEVELS - 1] > 0);
         --per_level_files_[LEVELS - 1];
     }
 }
 
 uint8_t RocksDBBlueFSVolumeSelector::select_prefer_bdev(void *h) {
+    cxxlab_assert(h != nullptr);
     uint8_t level = hint_to_level(h);
 
     switch (level) {

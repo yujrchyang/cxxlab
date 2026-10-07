@@ -46,11 +46,9 @@ struct bluefs_extent_t {
     uint64_t end() const { return offset + length; }
 
     DENC(bluefs_extent_t, v, p) {
-        DENC_START(1, 1, p);
-        denc(v.offset, p);
-        denc(v.length, p);
+        denc_lba(v.offset, p);
+        denc_varint_lowz(v.length, p);
         denc(v.bdev, p);
-        DENC_FINISH(p);
     }
 };
 
@@ -69,13 +67,21 @@ struct bluefs_fnode_delta_t {
     std::vector<bluefs_extent_t> extents;
 
     DENC(bluefs_fnode_delta_t, v, p) {
-        DENC_START(1, 1, p);
-        denc(v.ino, p);
-        denc(v.size, p);
-        denc(v.mtime, p);
-        denc(v.offset, p);
+        denc_varint(v.ino, p);
+        denc_varint(v.size, p);
+        if constexpr (std::is_const_v<T>) {
+            uint32_t sec = static_cast<uint32_t>(v.mtime / 1000000000ULL);
+            uint32_t nsec = static_cast<uint32_t>(v.mtime % 1000000000ULL);
+            denc(sec, p);
+            denc(nsec, p);
+        } else {
+            uint32_t sec, nsec;
+            denc(sec, p);
+            denc(nsec, p);
+            v.mtime = static_cast<uint64_t>(sec) * 1000000000ULL + nsec;
+        }
+        denc_lba(v.offset, p);
         denc(v.extents, p);
-        DENC_FINISH(p);
     }
 };
 
@@ -200,13 +206,21 @@ struct bluefs_fnode_t {
     friend std::enable_if_t<std::is_same_v<bluefs_fnode_t,
                                            std::remove_const_t<T>>>
     _denc_friend(T &v, P &p) {
-        DENC_START(1, 1, p);
-        denc(v.ino, p);
-        denc(v.size, p);
-        denc(v.mtime, p);
+        denc_varint(v.ino, p);
+        denc_varint(v.size, p);
+        if constexpr (std::is_const_v<T>) {
+            uint32_t sec = static_cast<uint32_t>(v.mtime / 1000000000ULL);
+            uint32_t nsec = static_cast<uint32_t>(v.mtime % 1000000000ULL);
+            denc(sec, p);
+            denc(nsec, p);
+        } else {
+            uint32_t sec, nsec;
+            denc(sec, p);
+            denc(nsec, p);
+            v.mtime = static_cast<uint64_t>(sec) * 1000000000ULL + nsec;
+        }
         denc(v.unused_, p);
         denc(v.extents, p);
-        DENC_FINISH(p);
     }
 };
 
@@ -249,16 +263,18 @@ WRITE_CLASS_DENC(bluefs_super_t);
 struct bluefs_transaction_t {
     enum op_t : uint8_t {
         OP_NONE = 0,
-        OP_INIT = 2,
-        OP_DIR_LINK = 5,
-        OP_DIR_UNLINK = 6,
-        OP_DIR_CREATE = 7,
-        OP_DIR_REMOVE = 8,
-        OP_FILE_UPDATE = 9,
-        OP_FILE_REMOVE = 10,
-        OP_JUMP = 11,
-        OP_JUMP_SEQ = 12,
-        OP_FILE_UPDATE_INC = 13,
+        OP_INIT = 1,
+        // OP_ALLOC_ADD = 2 (obsolete)
+        // OP_ALLOC_RM = 3 (obsolete)
+        OP_DIR_LINK = 4,
+        OP_DIR_UNLINK = 5,
+        OP_DIR_CREATE = 6,
+        OP_DIR_REMOVE = 7,
+        OP_FILE_UPDATE = 8,
+        OP_FILE_REMOVE = 9,
+        OP_JUMP = 10,
+        OP_JUMP_SEQ = 11,
+        OP_FILE_UPDATE_INC = 12,
     };
 
     uuid_d uuid;
@@ -352,6 +368,20 @@ struct bluefs_transaction_t {
         denc(v.uuid, p);
         denc(v.seq, p);
         denc(v.op_bl, p);
+        if constexpr (std::is_const_v<T>) {
+            // encode: append CRC32C of op_bl
+            uint32_t crc = v.op_bl.crc32c(-1);
+            denc(crc, p);
+        } else {
+            // decode: read and verify CRC32C
+            uint32_t expected_crc;
+            denc(expected_crc, p);
+            uint32_t actual_crc = v.op_bl.crc32c(-1);
+            if (actual_crc != expected_crc) {
+                throw buffer::malformed_input(
+                    "bluefs transaction CRC mismatch");
+            }
+        }
         DENC_FINISH(p);
     }
 };
