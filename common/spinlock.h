@@ -11,7 +11,7 @@ class spinlock {
 public:
     void lock();
     bool try_lock();
-    void unlock();
+    void unlock() noexcept;
 
 private:
     std::atomic_flag lock_;

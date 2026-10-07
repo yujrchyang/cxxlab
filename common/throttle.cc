@@ -82,6 +82,11 @@ bool Throttle::try_get(uint64_t n, std::chrono::milliseconds timeout) {
     if (!success) {
         // 超时，移除 CV
         conds_.erase(it);
+        // 唤醒新队首（防止 lost-wakeup：原队首超时退出后，
+        // 后继等待者的谓词可能已为 true 但丢失了唤醒）
+        if (!conds_.empty()) {
+            conds_.front().notify_one();
+        }
         return false;
     }
 
@@ -100,6 +105,9 @@ bool Throttle::try_get(uint64_t n, std::chrono::milliseconds timeout) {
 
 uint64_t Throttle::take(uint64_t n) {
     std::lock_guard<std::mutex> lock(lock_);
+    if (max_.load(std::memory_order_relaxed) == 0) {
+        return 0;
+    }
     count_.fetch_add(n, std::memory_order_relaxed);
     return count_.load(std::memory_order_relaxed);
 }
@@ -117,15 +125,23 @@ void Throttle::put(uint64_t n) {
 
 void Throttle::reset_max(uint64_t new_max) {
     std::lock_guard<std::mutex> lock(lock_);
+    uint64_t old = max_.load(std::memory_order_relaxed);
+    if (old == new_max) {
+        return;
+    }
     max_.store(new_max, std::memory_order_relaxed);
+    // max 变化后等待者的谓词可能变为 true，唤醒队首
+    if (!conds_.empty()) {
+        conds_.front().notify_one();
+    }
 }
 
 void Throttle::reset() {
     std::lock_guard<std::mutex> lock(lock_);
     count_.store(0, std::memory_order_relaxed);
-    // 唤醒所有等待者
-    for (auto &cv : conds_) {
-        cv.notify_all();
+    // 级联唤醒：只 notify 队首，队首成功后 notify 下一个（与 Ceph 一致）
+    if (!conds_.empty()) {
+        conds_.front().notify_one();
     }
 }
 

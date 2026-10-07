@@ -5,13 +5,12 @@
 #include <sys/uio.h>
 #include <unistd.h>
 
-#include <spdlog/spdlog.h>
-
 #include <atomic>
 #include <cerrno>
 #include <cstdlib>
 #include <cstring>
 #include <iomanip>
+#include <iostream>
 #include <sstream>
 
 #include "armor.h"
@@ -1475,21 +1474,21 @@ int buffer::list::write_file(const char *fn, int mode) {
     int fd = TEMP_FAILURE_RETRY(::open(fn, O_WRONLY | O_CREAT | O_TRUNC | O_CLOEXEC, mode));
     if (fd < 0) {
         int err = errno;
-        spdlog::error("bufferlist::write_file({}): failed to open file: {}",
-                      fn, cpp_strerror(err));
+        std::cerr << "bufferlist::write_file(" << fn
+                  << "): failed to open file: " << cpp_strerror(err) << std::endl;
         return -err;
     }
     int ret = write_fd(fd);
     if (ret) {
-        spdlog::error("bufferlist::write_fd({}): write_fd error: {}",
-                      fn, cpp_strerror(ret));
+        std::cerr << "bufferlist::write_fd(" << fn
+                  << "): write_fd error: " << cpp_strerror(ret) << std::endl;
         VOID_TEMP_FAILURE_RETRY(::close(fd));
         return ret;
     }
     if (TEMP_FAILURE_RETRY(::close(fd))) {
         int err = errno;
-        spdlog::error("bufferlist::write_file({}): close error: {}",
-                      fn, cpp_strerror(err));
+        std::cerr << "bufferlist::write_file(" << fn
+                  << "): close error: " << cpp_strerror(err) << std::endl;
         return -err;
     }
     return 0;

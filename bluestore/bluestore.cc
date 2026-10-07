@@ -1552,11 +1552,15 @@ int BlueStore::collection_list(CollectionRef c, const ghobject_t &start,
 
     std::string start_key, end_key;
     key_encode_object(start, &start_key);
-    key_encode_object(end, &end_key);
+    if (!end.is_max()) {
+        key_encode_object(end, &end_key);
+    }
 
     IteratorBounds bounds;
     bounds.lower_bound = start_key;
-    bounds.upper_bound = end_key;
+    if (!end.is_max()) {
+        bounds.upper_bound = end_key;
+    }
 
     auto it = db_->get_iterator(PREFIX_OBJ, 0, bounds);
     if (!it) return 0;
@@ -1602,9 +1606,7 @@ int BlueStore::collection_list(CollectionRef c, const ghobject_t &start,
     }
 
     if (next) {
-        *next = ghobject_t();
-        next->pool = c->get_coll_id();
-        next->hash = UINT32_MAX;
+        *next = ghobject_t::get_max();
     }
 
     return 0;

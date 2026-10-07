@@ -11,14 +11,14 @@ namespace {
 TEST(IntervalSetTest, EmptySet) {
     interval_set<uint64_t> is;
     EXPECT_TRUE(is.empty());
-    EXPECT_EQ(is.size(), 0u);
+    EXPECT_EQ(is.num_intervals(), 0u);
     EXPECT_EQ(is.begin(), is.end());
 }
 
 TEST(IntervalSetTest, BasicInsert) {
     interval_set<uint64_t> is;
     is.insert(10, 5);
-    EXPECT_EQ(is.size(), 1u);
+    EXPECT_EQ(is.num_intervals(), 1u);
     auto it = is.begin();
     EXPECT_EQ(it.get_start(), 10u);
     EXPECT_EQ(it.get_len(), 5u);
@@ -34,7 +34,7 @@ TEST(IntervalSetTest, MergeAdjacent) {
     interval_set<uint64_t> is;
     is.insert(0, 10);
     is.insert(10, 10);
-    EXPECT_EQ(is.size(), 1u);
+    EXPECT_EQ(is.num_intervals(), 1u);
     auto it = is.begin();
     EXPECT_EQ(it.get_start(), 0u);
     EXPECT_EQ(it.get_len(), 20u);
@@ -44,7 +44,7 @@ TEST(IntervalSetTest, MergeAdjacentReverse) {
     interval_set<uint64_t> is;
     is.insert(10, 10);
     is.insert(0, 10);
-    EXPECT_EQ(is.size(), 1u);
+    EXPECT_EQ(is.num_intervals(), 1u);
     auto it = is.begin();
     EXPECT_EQ(it.get_start(), 0u);
     EXPECT_EQ(it.get_len(), 20u);
@@ -54,7 +54,7 @@ TEST(IntervalSetTest, MergeOverlapping) {
     interval_set<uint64_t> is;
     is.insert(0, 10);
     is.insert(5, 10);
-    EXPECT_EQ(is.size(), 1u);
+    EXPECT_EQ(is.num_intervals(), 1u);
     auto it = is.begin();
     EXPECT_EQ(it.get_start(), 0u);
     EXPECT_EQ(it.get_len(), 15u);
@@ -64,7 +64,7 @@ TEST(IntervalSetTest, MergeOverlappingReverse) {
     interval_set<uint64_t> is;
     is.insert(5, 10);
     is.insert(0, 10);
-    EXPECT_EQ(is.size(), 1u);
+    EXPECT_EQ(is.num_intervals(), 1u);
     auto it = is.begin();
     EXPECT_EQ(it.get_start(), 0u);
     EXPECT_EQ(it.get_len(), 15u);
@@ -74,7 +74,7 @@ TEST(IntervalSetTest, MergeContained) {
     interval_set<uint64_t> is;
     is.insert(0, 20);
     is.insert(5, 5);
-    EXPECT_EQ(is.size(), 1u);
+    EXPECT_EQ(is.num_intervals(), 1u);
     auto it = is.begin();
     EXPECT_EQ(it.get_start(), 0u);
     EXPECT_EQ(it.get_len(), 20u);
@@ -84,7 +84,7 @@ TEST(IntervalSetTest, MergeExactSame) {
     interval_set<uint64_t> is;
     is.insert(10, 10);
     is.insert(10, 10);
-    EXPECT_EQ(is.size(), 1u);
+    EXPECT_EQ(is.num_intervals(), 1u);
     auto it = is.begin();
     EXPECT_EQ(it.get_start(), 10u);
     EXPECT_EQ(it.get_len(), 10u);
@@ -96,7 +96,7 @@ TEST(IntervalSetTest, MergeMultiple) {
     is.insert(10, 5);
     is.insert(20, 5);
     is.insert(5, 15);
-    EXPECT_EQ(is.size(), 1u);
+    EXPECT_EQ(is.num_intervals(), 1u);
     auto it = is.begin();
     EXPECT_EQ(it.get_start(), 0u);
     EXPECT_EQ(it.get_len(), 25u);
@@ -106,7 +106,7 @@ TEST(IntervalSetTest, NoMergeGap) {
     interval_set<uint64_t> is;
     is.insert(0, 5);
     is.insert(10, 5);
-    EXPECT_EQ(is.size(), 2u);
+    EXPECT_EQ(is.num_intervals(), 2u);
 }
 
 TEST(IntervalSetTest, EraseComplete) {
@@ -120,14 +120,14 @@ TEST(IntervalSetTest, EraseZeroLen) {
     interval_set<uint64_t> is;
     is.insert(10, 10);
     is.erase(10, 0);
-    EXPECT_EQ(is.size(), 1u);
+    EXPECT_EQ(is.num_intervals(), 1u);
 }
 
 TEST(IntervalSetTest, ErasePartialLeft) {
     interval_set<uint64_t> is;
     is.insert(10, 10);
     is.erase(10, 5);
-    EXPECT_EQ(is.size(), 1u);
+    EXPECT_EQ(is.num_intervals(), 1u);
     auto it = is.begin();
     EXPECT_EQ(it.get_start(), 15u);
     EXPECT_EQ(it.get_len(), 5u);
@@ -137,7 +137,7 @@ TEST(IntervalSetTest, ErasePartialRight) {
     interval_set<uint64_t> is;
     is.insert(10, 10);
     is.erase(15, 5);
-    EXPECT_EQ(is.size(), 1u);
+    EXPECT_EQ(is.num_intervals(), 1u);
     auto it = is.begin();
     EXPECT_EQ(it.get_start(), 10u);
     EXPECT_EQ(it.get_len(), 5u);
@@ -147,7 +147,7 @@ TEST(IntervalSetTest, EraseSplit) {
     interval_set<uint64_t> is;
     is.insert(0, 20);
     is.erase(5, 10);
-    EXPECT_EQ(is.size(), 2u);
+    EXPECT_EQ(is.num_intervals(), 2u);
     auto it = is.begin();
     EXPECT_EQ(it.get_start(), 0u);
     EXPECT_EQ(it.get_len(), 5u);
@@ -162,7 +162,7 @@ TEST(IntervalSetTest, EraseMultipleIntervals) {
     is.insert(10, 5);
     is.insert(20, 5);
     is.erase(3, 20);
-    EXPECT_EQ(is.size(), 2u);
+    EXPECT_EQ(is.num_intervals(), 2u);
     auto it = is.begin();
     EXPECT_EQ(it.get_start(), 0u);
     EXPECT_EQ(it.get_len(), 3u);
@@ -182,7 +182,7 @@ TEST(IntervalSetTest, EraseNoOverlap) {
     is.insert(0, 10);
     is.insert(20, 10);
     is.erase(50, 10);
-    EXPECT_EQ(is.size(), 2u);
+    EXPECT_EQ(is.num_intervals(), 2u);
 }
 
 TEST(IntervalSetTest, RangeStartEndEmptyAsserts) {
@@ -209,7 +209,7 @@ TEST(IntervalSetTest, InsertSet) {
     is2.insert(25, 10);
 
     is1.insert(is2);
-    EXPECT_EQ(is1.size(), 2u);
+    EXPECT_EQ(is1.num_intervals(), 2u);
     auto it = is1.begin();
     EXPECT_EQ(it.get_start(), 0u);
     EXPECT_EQ(it.get_len(), 15u);
@@ -222,7 +222,7 @@ TEST(IntervalSetTest, Clear) {
     interval_set<uint64_t> is;
     is.insert(0, 10);
     is.insert(20, 10);
-    EXPECT_EQ(is.size(), 2u);
+    EXPECT_EQ(is.num_intervals(), 2u);
     is.clear();
     EXPECT_TRUE(is.empty());
 }
@@ -235,9 +235,9 @@ TEST(IntervalSetTest, Swap) {
     is2.insert(20, 10);
 
     is1.swap(is2);
-    EXPECT_EQ(is1.size(), 1u);
+    EXPECT_EQ(is1.num_intervals(), 1u);
     EXPECT_EQ(is1.begin()->first, 20u);
-    EXPECT_EQ(is2.size(), 1u);
+    EXPECT_EQ(is2.num_intervals(), 1u);
     EXPECT_EQ(is2.begin()->first, 0u);
 }
 
@@ -254,6 +254,77 @@ TEST(IntervalSetTest, IteratorIncrement) {
         EXPECT_EQ(it.get_len(), 5u);
     }
     EXPECT_EQ(i, 3);
+}
+
+// ============================================================================
+// size() 总覆盖长度语义测试（对齐 Ceph interval_set::size()）
+// ============================================================================
+
+TEST(IntervalSetTest, SizeReturnsTotalCoverage) {
+    interval_set<uint64_t> is;
+    EXPECT_EQ(is.size(), 0u);
+
+    is.insert(0, 10);
+    EXPECT_EQ(is.size(), 10u);
+
+    is.insert(20, 10);
+    EXPECT_EQ(is.size(), 20u);  // 10 + 10
+}
+
+TEST(IntervalSetTest, SizeAfterMerge) {
+    interval_set<uint64_t> is;
+    is.insert(0, 10);
+    is.insert(10, 10);  // adjacent, merge
+    EXPECT_EQ(is.size(), 20u);  // 0-20
+    EXPECT_EQ(is.num_intervals(), 1u);
+}
+
+TEST(IntervalSetTest, SizeAfterOverlap) {
+    interval_set<uint64_t> is;
+    is.insert(0, 10);
+    is.insert(5, 10);  // overlap
+    EXPECT_EQ(is.size(), 15u);  // 0-15
+}
+
+TEST(IntervalSetTest, SizeAfterErase) {
+    interval_set<uint64_t> is;
+    is.insert(0, 20);
+    is.erase(5, 10);
+    EXPECT_EQ(is.size(), 10u);  // 0-5 + 15-20 = 5+5=10
+    EXPECT_EQ(is.num_intervals(), 2u);
+}
+
+TEST(IntervalSetTest, SizeAfterClear) {
+    interval_set<uint64_t> is;
+    is.insert(0, 10);
+    is.insert(20, 10);
+    EXPECT_EQ(is.size(), 20u);
+    is.clear();
+    EXPECT_EQ(is.size(), 0u);
+}
+
+TEST(IntervalSetTest, SizeAfterSwap) {
+    interval_set<uint64_t> is1;
+    is1.insert(0, 10);
+    interval_set<uint64_t> is2;
+    is2.insert(20, 20);
+    is1.swap(is2);
+    EXPECT_EQ(is1.size(), 20u);
+    EXPECT_EQ(is2.size(), 10u);
+}
+
+TEST(IntervalSetTest, SizeAfterInsertSet) {
+    interval_set<uint64_t> is1;
+    is1.insert(0, 10);
+    is1.insert(20, 10);  // is1: 0-10, 20-30, size=20
+
+    interval_set<uint64_t> is2;
+    is2.insert(5, 10);   // is2: 5-15, size=10
+    is2.insert(25, 10);  // is2: 25-35, size=20
+
+    is1.insert(is2);
+    // is1: 0-15 (15) + 20-35 (15) = 30
+    EXPECT_EQ(is1.size(), 30u);
 }
 
 }  // namespace

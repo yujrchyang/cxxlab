@@ -12,7 +12,7 @@ bool spinlock::try_lock() {
     return !lock_.test_and_set(std::memory_order_acquire);
 }
 
-void spinlock::unlock() {
+void spinlock::unlock() noexcept {
     lock_.clear(std::memory_order_release);
     lock_.notify_all();
 }

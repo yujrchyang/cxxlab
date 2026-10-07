@@ -375,3 +375,101 @@ TEST(Throttle, PutOverflowAsserts) {
     t.get(50);
     EXPECT_DEATH(t.put(60), ".*");
 }
+
+// P4: take 在 max==0（禁用）时应 no-op，对齐 Ceph 语义
+TEST(Throttle, TakeNoopWhenMaxZero) {
+    Throttle t(0);  // 禁用节流器
+    ASSERT_EQ(t.take(50), 0u);
+    ASSERT_EQ(t.get_current(), 0u);
+
+    // reset_max 后正常工作
+    t.reset_max(100);
+    ASSERT_EQ(t.take(50), 50u);
+    ASSERT_EQ(t.get_current(), 50u);
+}
+
+// ============================================================================
+// 回归测试：唤醒机制
+// ============================================================================
+
+// P5: reset_max 增大上限后应唤醒队首等待者
+TEST(Throttle, ResetMaxWakesWaiters) {
+    Throttle t(100);
+    t.get(100);  // count=100, max=100
+
+    std::atomic<bool> got{false};
+    std::thread worker([&] {
+        t.get(50);  // 100+50>100，阻塞
+        got.store(true);
+    });
+
+    // 确认 worker 阻塞
+    for (int i = 0; i < 10 && !got.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_FALSE(got.load()) << "worker should be blocked before reset_max";
+
+    t.reset_max(200);  // 增大上限，50 的谓词变为 true
+
+    // 给 worker 时间被唤醒（修复后应立即被唤醒，未修复则永久阻塞）
+    for (int i = 0; i < 50 && !got.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(got.load()) << "reset_max did not wake the blocked waiter";
+    worker.join();
+    ASSERT_EQ(t.get_current(), 150);
+    t.put(150);
+}
+
+// P6: try_get 超时退出后应 notify 新队首，防止 lost-wakeup 饿死后继
+TEST(Throttle, TryGetTimeoutDoesNotStarveFollower) {
+    Throttle t(100);
+    t.get(100);  // count=100, max=100
+
+    std::atomic<bool> a_done{false};
+    std::atomic<bool> b_done{false};
+
+    // A: try_get(50, 200ms) — 会超时（100+50>100，且 put(40) 后 60+50>100 仍阻塞）
+    std::thread a([&] {
+        bool ok = t.try_get(50, std::chrono::milliseconds(200));
+        a_done.store(true);
+        EXPECT_FALSE(ok);
+    });
+
+    // B: get(10) — 无超时，不应被 A 的超时饿死
+    std::thread b([&] {
+        t.get(10);
+        b_done.store(true);
+        t.put(10);
+    });
+
+    // 确保 A, B 入队（50ms，A 超时 200ms 远未到期）
+    std::this_thread::sleep_for(std::chrono::milliseconds(50));
+    ASSERT_FALSE(a_done.load()) << "A should be blocked";
+    ASSERT_FALSE(b_done.load()) << "B should be blocked";
+
+    // put(40) → count=60，notify 队首 A
+    // A 的 should_wait(50): 60+50=110>100 → true，A 谓词 false，重阻塞
+    t.put(40);
+
+    // 等 A 超时退出（A 从入队算 200ms，已过 ~50ms，再等 ~200ms）
+    for (int i = 0; i < 30 && !a_done.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(a_done.load()) << "A should have timed out";
+
+    // A 超时应 notify 新队首 B
+    // B 的 should_wait(10): 60+10=70<=100 → false，谓词 true
+    // B 应被唤醒（修复后），未修复则永久阻塞
+    for (int i = 0; i < 50 && !b_done.load(); ++i) {
+        std::this_thread::sleep_for(std::chrono::milliseconds(10));
+    }
+    ASSERT_TRUE(b_done.load()) << "B starved after A timeout (lost-wakeup)";
+
+    a.join();
+    b.join();
+
+    // B get(10)+put(10) 后 count 回到 60
+    ASSERT_EQ(t.get_current(), 60);
+    t.put(60);
+}

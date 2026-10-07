@@ -22,6 +22,7 @@ struct ghobject_t {
     uint64_t snap = 0;
     uint64_t generation = NO_GEN;
     uint8_t shard_id = NO_SHARD;
+    bool max = false;
 
     ghobject_t() = default;
 
@@ -35,6 +36,9 @@ struct ghobject_t {
 
     bool is_no_gen() const { return generation == NO_GEN; }
     bool is_no_shard() const { return shard_id == NO_SHARD; }
+    bool is_max() const { return max; }
+
+    static ghobject_t get_max();
 
     std::string get_key() const { return key.empty() ? oid : key; }
 
@@ -50,7 +54,10 @@ struct ghobject_t {
     bool match(uint32_t bits, uint32_t match_val) const;
 
     DENC(ghobject_t, v, p) {
-        DENC_START(1, 1, p);
+        DENC_START(2, 1, p);
+        if (struct_v >= 2) {
+            denc(v.max, p);
+        }
         denc(v.pool, p);
         denc(v.hash, p);
         denc(v.nspace, p);

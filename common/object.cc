@@ -13,6 +13,12 @@ uint32_t ghobject_t::reverse_bits(uint32_t v) {
     return v;
 }
 
+ghobject_t ghobject_t::get_max() {
+    ghobject_t g;
+    g.max = true;
+    return g;
+}
+
 uint32_t ghobject_t::reverse_nibbles(uint32_t v) {
     v = ((v >> 4) & 0x0f0f0f0f) | ((v & 0x0f0f0f0f) << 4);
     v = ((v >> 8) & 0x00ff00ff) | ((v & 0x00ff00ff) << 8);
@@ -25,7 +31,8 @@ bool ghobject_t::match(uint32_t bits, uint32_t match_val) const {
 }
 
 bool operator==(const ghobject_t &l, const ghobject_t &r) {
-    return l.pool == r.pool && l.hash == r.hash && l.nspace == r.nspace &&
+    return l.max == r.max &&
+        l.pool == r.pool && l.hash == r.hash && l.nspace == r.nspace &&
         l.key == r.key && l.oid == r.oid && l.snap == r.snap &&
         l.generation == r.generation && l.shard_id == r.shard_id;
 }
@@ -35,6 +42,9 @@ bool operator!=(const ghobject_t &l, const ghobject_t &r) {
 }
 
 bool operator<(const ghobject_t &l, const ghobject_t &r) {
+    // max 对象排在最后（排序最大值）
+    if (l.max != r.max) return r.max;
+    if (l.max) return false;
     if (l.shard_id != r.shard_id) return l.shard_id < r.shard_id;
     if (l.pool != r.pool) return l.pool < r.pool;
     if (l.get_bitwise_key_u32() != r.get_bitwise_key_u32())

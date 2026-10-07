@@ -308,3 +308,75 @@ TEST(KeyEncoding, MultipleObjectsSortOrder) {
             << "Key " << i << " should be less than key " << (i + 1);
     }
 }
+
+// ============================================================================
+// max 哨兵测试
+// ============================================================================
+
+TEST(Ghobject, IsMax) {
+    ghobject_t obj;
+    EXPECT_FALSE(obj.is_max());
+
+    ghobject_t max_obj = ghobject_t::get_max();
+    EXPECT_TRUE(max_obj.is_max());
+}
+
+TEST(Ghobject, MaxSortsLast) {
+    ghobject_t normal(1, 10, "ns", "", "obj", 0, 0);
+    ghobject_t max_obj = ghobject_t::get_max();
+
+    // 普通对象 < max
+    EXPECT_TRUE(normal < max_obj);
+    EXPECT_FALSE(max_obj < normal);
+
+    // max 不小于自己
+    EXPECT_FALSE(max_obj < max_obj);
+    EXPECT_FALSE(normal < normal);
+}
+
+TEST(Ghobject, MaxNotEqualNormal) {
+    ghobject_t normal(1, 10, "ns", "", "obj", 0, 0);
+    ghobject_t max_obj = ghobject_t::get_max();
+
+    EXPECT_NE(normal, max_obj);
+    EXPECT_NE(max_obj, normal);
+}
+
+TEST(Ghobject, MaxDencRoundtrip) {
+    ghobject_t max_obj = ghobject_t::get_max();
+
+    bufferlist bl;
+    encode(max_obj, bl);
+    auto p = bl.cbegin();
+    ghobject_t decoded;
+    decode(decoded, p);
+
+    EXPECT_TRUE(decoded.is_max());
+    EXPECT_EQ(max_obj, decoded);
+}
+
+TEST(Ghobject, SortWithMax) {
+    std::vector<ghobject_t> objects;
+    objects.emplace_back(1, 0, "", "", "a", 0, 0);
+    objects.emplace_back(1, 0, "", "", "b", 0, 0);
+    objects.emplace_back(1, 0, "", "", "c", 0, 0);
+    objects.push_back(ghobject_t::get_max());
+
+    std::sort(objects.begin(), objects.end());
+
+    // max 应排在最后
+    EXPECT_TRUE(objects.back().is_max());
+    EXPECT_EQ(objects[0].oid, "a");
+    EXPECT_EQ(objects[1].oid, "b");
+    EXPECT_EQ(objects[2].oid, "c");
+}
+
+TEST(Ghobject, MaxHashDoesNotCollideWithSentinel) {
+    // hash=UINT32_MAX 的合法对象不应被误判为 max
+    ghobject_t obj(1, UINT32_MAX, "", "", "obj", 0, 0);
+    EXPECT_FALSE(obj.is_max());
+
+    ghobject_t max_obj = ghobject_t::get_max();
+    EXPECT_NE(obj, max_obj);
+    EXPECT_TRUE(obj < max_obj);
+}

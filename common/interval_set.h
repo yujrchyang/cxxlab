@@ -36,7 +36,10 @@ public:
     const_iterator begin() const { return const_iterator(m_.begin()); }
     const_iterator end() const { return const_iterator(m_.end()); }
     bool empty() const { return m_.empty(); }
-    size_t size() const { return m_.size(); }
+    // 总覆盖长度（与 Ceph interval_set::size() 语义一致）
+    T size() const { return _size; }
+    // 区间数量
+    size_t num_intervals() const { return m_.size(); }
 
     void insert(T off, T len) {
         if (len == 0) return;
@@ -56,6 +59,7 @@ public:
             }
         }
         m_[off] = len;
+        _recalc_size();
     }
 
     void erase(T off, T len) {
@@ -65,13 +69,11 @@ public:
             auto prev = it;
             --prev;
             if (prev->first + prev->second > off) {
-                auto left_end = off;
-                if (prev->first < off) {
-                    auto old_end = prev->second;
-                    prev->second = off - prev->first;
-                    if (off + len < prev->first + old_end) {
-                        m_[off + len] = (prev->first + old_end) - (off + len);
-                    }
+                // lower_bound 语义保证 prev->first < off，无需额外检查
+                auto old_end = prev->second;
+                prev->second = off - prev->first;
+                if (off + len < prev->first + old_end) {
+                    m_[off + len] = (prev->first + old_end) - (off + len);
                 }
             }
         }
@@ -83,11 +85,18 @@ public:
             }
             it = m_.erase(it);
         }
+        _recalc_size();
     }
 
-    void clear() { m_.clear(); }
+    void clear() {
+        m_.clear();
+        _size = 0;
+    }
 
-    void swap(interval_set &o) { m_.swap(o.m_); }
+    void swap(interval_set &o) {
+        m_.swap(o.m_);
+        std::swap(_size, o._size);
+    }
 
     T range_start() const {
         cxxlab_assert(!m_.empty());
@@ -109,16 +118,26 @@ public:
 
     void decode(buffer::ptr::const_iterator &p) {
         denc(m_, p);
+        _recalc_size();
     }
 
     void decode(bufferlist::const_iterator &p) {
         denc(m_, p);
+        _recalc_size();
     }
 
     const Map &get_map() const { return m_; }
 
 private:
     Map m_;
+    T _size = 0;
+
+    void _recalc_size() {
+        _size = 0;
+        for (const auto &[off, len] : m_) {
+            _size += len;
+        }
+    }
 };
 
 template <typename T>

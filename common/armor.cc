@@ -125,8 +125,8 @@ int unarmor(char *dst, char *const dst_end,
         src += 4;
     }
     return olen;
+}
 
 #undef SET_DST
-}
 
 }  // namespace TOPNSPC

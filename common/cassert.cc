@@ -30,9 +30,10 @@ public:
         if (!syms) return {};
 
         std::string out;
-        for (size_t i = 0; i < size_; i++) {
+        // 跳过帧 0（Backtrace 构造函数自身），从帧 1 开始
+        for (size_t i = 1; i < size_; i++) {
             out += "  ";
-            out += std::to_string(i + 1);
+            out += std::to_string(i);
             out += ": ";
             out += demangle(syms[i]);
             out += "\n";

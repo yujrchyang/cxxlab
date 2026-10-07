@@ -3,6 +3,8 @@
 
 #include "perf_counter.h"
 
+#include <cstring>
+
 #include "cassert.h"
 
 namespace TOPNSPC {
@@ -21,7 +23,7 @@ PerfCounterData::PerfCounterData(const PerfCounterData &other)
 std::pair<uint64_t, uint64_t> PerfCounterData::read_avg() const {
     uint64_t sum, count;
     do {
-        count = avgcount2_.load(std::memory_order_relaxed);
+        count = avgcount2_.load(std::memory_order_acquire);
         sum = sum_.load(std::memory_order_relaxed);
     } while (avgcount_.load(std::memory_order_relaxed) != count);
     return {sum, count};
@@ -43,11 +45,14 @@ PerfCountersBuilder::PerfCountersBuilder(std::string name, int first, int last)
 PerfCountersBuilder::~PerfCountersBuilder() = default;
 
 void PerfCountersBuilder::add_impl(int idx, const char *name,
-                                   const char *description, const char *nick,
-                                   int prio, PerfCounterType type,
-                                   PerfCounterUnit unit) {
+                                    const char *description, const char *nick,
+                                    int prio, PerfCounterType type,
+                                    PerfCounterUnit unit) {
     cxxlab_assert(idx > first_);
     cxxlab_assert(idx < last_);
+    cxxlab_assert(!nick || strlen(nick) <= 4);
+    cxxlab_assert(type != PERFCOUNTER_NONE);
+    cxxlab_assert(type & (PERFCOUNTER_U64 | PERFCOUNTER_TIME));
     PerfCounterData &d = perf_counters_->data(idx);
     d.name = name;
     d.description = description;
@@ -122,7 +127,7 @@ void PerfCounters::inc(int idx, uint64_t v) {
     if (d.type & PERFCOUNTER_LONGRUNAVG) {
         d.avgcount_.fetch_add(1, std::memory_order_relaxed);
         d.sum_.fetch_add(v, std::memory_order_relaxed);
-        d.avgcount2_.fetch_add(1, std::memory_order_relaxed);
+        d.avgcount2_.fetch_add(1, std::memory_order_release);
     } else {
         d.sum_.fetch_add(v, std::memory_order_relaxed);
     }
@@ -143,7 +148,7 @@ void PerfCounters::set(int idx, uint64_t v) {
     if (d.type & PERFCOUNTER_LONGRUNAVG) {
         d.avgcount_.fetch_add(1, std::memory_order_relaxed);
         d.sum_.store(v, std::memory_order_relaxed);
-        d.avgcount2_.fetch_add(1, std::memory_order_relaxed);
+        d.avgcount2_.fetch_add(1, std::memory_order_release);
     } else {
         d.sum_.store(v, std::memory_order_relaxed);
     }
@@ -163,7 +168,7 @@ void PerfCounters::tinc(int idx, uint64_t nanos) {
     if (d.type & PERFCOUNTER_LONGRUNAVG) {
         d.avgcount_.fetch_add(1, std::memory_order_relaxed);
         d.sum_.fetch_add(nanos, std::memory_order_relaxed);
-        d.avgcount2_.fetch_add(1, std::memory_order_relaxed);
+        d.avgcount2_.fetch_add(1, std::memory_order_release);
     } else {
         d.sum_.fetch_add(nanos, std::memory_order_relaxed);
     }

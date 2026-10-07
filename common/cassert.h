@@ -81,7 +81,8 @@ void __common_assert_warn(const char *assertion,
 // ── Global-namespace aliases with cxxlab_ prefix ──
 
 #define cxxlab_assert(expr) common_assert(expr)
-#define cxxlab_abort(...) common_abort(__VA_ARGS__)
+#define cxxlab_abort(msg) common_abort_msg(msg)
+#define cxxlab_abortf(...) common_abort(__VA_ARGS__)
 #define cxxlab_abort_msg(msg) common_abort_msg(msg)
 #define cxxlab_assertf(expr, ...) common_assertf(expr, __VA_ARGS__)
 #define cxxlab_assert_warn(expr) assert_warn(expr)

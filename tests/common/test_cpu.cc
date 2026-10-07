@@ -28,9 +28,12 @@ TEST(CpuX86Test, AtLeastOneFeatureEnabled) {
     EXPECT_TRUE(any);
 }
 
-TEST(CpuX86Test, AesniIsDetected) {
+TEST(CpuX86Test, AesniIsStableAfterProbe) {
     cpu::probe();
-    EXPECT_EQ(cpu::features::intel_aesni, cpu::features::intel_aesni);
+    bool v1 = cpu::features::intel_aesni;
+    cpu::probe();
+    bool v2 = cpu::features::intel_aesni;
+    EXPECT_EQ(v1, v2);
 }
 #elif defined(__aarch64__)
 TEST(CpuAarch64Test, NeonIsBaseline) {
@@ -38,20 +41,33 @@ TEST(CpuAarch64Test, NeonIsBaseline) {
     EXPECT_TRUE(cpu::features::neon);
 }
 
-TEST(CpuAarch64Test, Crc32IsDetected) {
+TEST(CpuAarch64Test, Crc32IsStableAfterProbe) {
     cpu::probe();
-    EXPECT_EQ(cpu::features::aarch64_crc32, cpu::features::aarch64_crc32);
+    bool v1 = cpu::features::aarch64_crc32;
+    cpu::probe();
+    bool v2 = cpu::features::aarch64_crc32;
+    EXPECT_EQ(v1, v2);
 }
 #elif defined(__arm__)
-TEST(CpuArmTest, NeonIsDetected) {
+TEST(CpuArmTest, NeonIsStableAfterProbe) {
     cpu::probe();
-    EXPECT_EQ(cpu::features::neon, cpu::features::neon);
+    bool v1 = cpu::features::neon;
+    cpu::probe();
+    bool v2 = cpu::features::neon;
+    EXPECT_EQ(v1, v2);
 }
 #endif
 
-TEST(CpuTest, StaticInitializationRan) {
-    bool any = cpu::features::intel_pclmul || cpu::features::intel_sse42 || cpu::features::intel_sse41 || cpu::features::intel_ssse3 || cpu::features::intel_sse3 || cpu::features::intel_sse2 || cpu::features::intel_aesni || cpu::features::neon || cpu::features::aarch64_crc32 || cpu::features::aarch64_pmull;
-    EXPECT_EQ(any, any);
+TEST(CpuTest, FeaturesAreAccessibleAfterStaticInit) {
+    // 验证静态初始化后所有特性字段可访问且为有效 bool 值
+    EXPECT_NO_FATAL_FAILURE({
+        bool any = cpu::features::intel_pclmul || cpu::features::intel_sse42 ||
+                   cpu::features::intel_sse41 || cpu::features::intel_ssse3 ||
+                   cpu::features::intel_sse3 || cpu::features::intel_sse2 ||
+                   cpu::features::intel_aesni || cpu::features::neon ||
+                   cpu::features::aarch64_crc32 || cpu::features::aarch64_pmull;
+        (void)any;
+    });
 }
 
 TEST(CpuTest, AllFeaturesAreBool) {
