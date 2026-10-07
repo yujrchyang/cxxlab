@@ -941,7 +941,7 @@ Implement BlueStore 引擎 (BlueFS + BlueRocksEnv + BlueStore) for cxxlab, model
 
 ---
 
-## 阶段六：重构（R7 落地后）[ ]
+## 阶段六：重构（R7 落地后）[✅]
 
 > 核心方向: 用模块提取替代文件拆分——每次提取产出一个独立可测的深模块（自有 `.h`/`.cc`/test 文件，构造时不依赖 BlueStore），而非把 BlueStore 的成员函数搬到不同 `.cc` 文件。模块留在 `bluestore/` 目录下编入 `libbluestore.so`，与 `BufferCache`/`ExtentMap`/`Blob` 同级。
 

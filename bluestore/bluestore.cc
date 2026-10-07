@@ -1839,7 +1839,7 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
                 uint64_t b_off = offset - bstart;
                 uint32_t alloc_len32 = alloc_len;
                 if (prev_ep->blob->can_reuse_blob(min_alloc_size_, max_bsize,
-                                                   b_off, &alloc_len32) &&
+                                                  b_off, &alloc_len32) &&
                     !wctx->has_conflict(prev_ep->blob, b_off, alloc_len32)) {
                     o->extent_map.punch_hole(offset, length,
                                              &wctx->old_extents);

@@ -60,8 +60,8 @@ int BlueFS::add_block_device(unsigned id, const std::string &path, bool trim,
         b->discard(0, b->get_size());
     }
 
-    bdev_[id] = b.release();           // 转移所有权到 BlueFS
-    ioc_[id] = new IOContext(nullptr); // BlueFS 拥有
+    bdev_[id] = b.release();            // 转移所有权到 BlueFS
+    ioc_[id] = new IOContext(nullptr);  // BlueFS 拥有
 
     if (shared_alloc) {
         shared_alloc_ = shared_alloc;
@@ -227,7 +227,7 @@ int BlueFS::_allocate(uint8_t prefer_bdev, uint64_t len, uint64_t alloc_unit,
     // 注意：prefer_bdev 可能是共享分配器对应的设备
     // is_shared_alloc(prefer_bdev) 为 true 时，alloc_[prefer_bdev] 指向外部分配器
     // 此方法只是使用分配器，不涉及所有权转移
-    
+
     if (alloc_unit == 0) {
         alloc_unit = alloc_size_[prefer_bdev];
         if (alloc_unit == 0) alloc_unit = cfg_.alloc_size;

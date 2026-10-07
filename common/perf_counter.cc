@@ -45,9 +45,9 @@ PerfCountersBuilder::PerfCountersBuilder(std::string name, int first, int last)
 PerfCountersBuilder::~PerfCountersBuilder() = default;
 
 void PerfCountersBuilder::add_impl(int idx, const char *name,
-                                    const char *description, const char *nick,
-                                    int prio, PerfCounterType type,
-                                    PerfCounterUnit unit) {
+                                   const char *description, const char *nick,
+                                   int prio, PerfCounterType type,
+                                   PerfCounterUnit unit) {
     cxxlab_assert(idx > first_);
     cxxlab_assert(idx < last_);
     cxxlab_assert(!nick || strlen(nick) <= 4);
