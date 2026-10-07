@@ -68,7 +68,8 @@ public:
 
     iterator set_lextent(uint32_t logical_offset, uint32_t blob_offset,
                          uint32_t length, BlobRef b,
-                         std::vector<OldExtent> *old_extents);
+                         std::vector<OldExtent> *old_extents,
+                         uint64_t min_alloc_size = 0);
 
     bool has_any_lextents(uint64_t offset, uint64_t length) const {
         for (const auto &e : extent_map_) {

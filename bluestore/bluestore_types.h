@@ -18,12 +18,12 @@ namespace TOPNSPC {
 using bluestore_pextent_t = pextent_t;
 
 enum ChecksumType : uint8_t {
-    CSUM_NONE = 0,
-    CSUM_CRC32C = 1,
+    CSUM_NONE = 1,
     CSUM_XXHASH32 = 2,
     CSUM_XXHASH64 = 3,
-    CSUM_CRC32C_16 = 4,
-    CSUM_CRC32C_8 = 5,
+    CSUM_CRC32C = 4,
+    CSUM_CRC32C_16 = 5,
+    CSUM_CRC32C_8 = 6,
 };
 
 inline size_t csum_value_size(uint8_t type) {
@@ -32,9 +32,11 @@ inline size_t csum_value_size(uint8_t type) {
         return 0;
     case CSUM_CRC32C:
     case CSUM_XXHASH32:
-    case CSUM_CRC32C_16:
-    case CSUM_CRC32C_8:
         return 4;
+    case CSUM_CRC32C_16:
+        return 2;
+    case CSUM_CRC32C_8:
+        return 1;
     case CSUM_XXHASH64:
         return 8;
     default:

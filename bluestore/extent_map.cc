@@ -187,8 +187,12 @@ int ExtentMap::compress_extent_map(uint64_t offset, uint64_t length) {
 ExtentMap::iterator ExtentMap::set_lextent(uint32_t logical_offset,
                                            uint32_t blob_offset,
                                            uint32_t length, BlobRef b,
-                                           std::vector<OldExtent> *old_extents) {
+                                           std::vector<OldExtent> *old_extents,
+                                           uint64_t min_alloc_size) {
     if (old_extents) {
+        // get_ref before punch_hole to prevent blob from being freed
+        // if the new write reuses the same blob being overwritten
+        b->get_ref(blob_offset, length, min_alloc_size);
         punch_hole(logical_offset, length, old_extents);
     }
     return add(logical_offset, blob_offset, length, b);

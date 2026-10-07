@@ -319,8 +319,8 @@ struct WriteContext {
         bool mark_unused;
 
         write_item(uint64_t loffs, BlobRef blob, uint64_t blen, uint64_t o,
-                   bufferlist &data, uint64_t o0, uint64_t len0, bool nb,
-                   bool mu)
+                   bufferlist &data, uint64_t o0, uint64_t len0, bool mu,
+                   bool nb)
             : logical_offset(loffs), b(blob), blob_length(blen), b_off(o), bl(data), b_off0(o0), length0(len0), new_blob(nb), mark_unused(mu) {}
     };
 
@@ -331,9 +331,19 @@ struct WriteContext {
     std::vector<OldExtent> old_extents;
 
     void write(uint64_t loffs, BlobRef b, uint64_t blen, uint64_t o,
-               bufferlist &data, uint64_t o0, uint64_t len0, bool nb,
-               bool mu) {
-        writes.emplace_back(loffs, b, blen, o, data, o0, len0, nb, mu);
+               bufferlist &data, uint64_t o0, uint64_t len0, bool mu,
+               bool nb) {
+        writes.emplace_back(loffs, b, blen, o, data, o0, len0, mu, nb);
+    }
+
+    bool has_conflict(BlobRef b, uint64_t b_off, uint64_t b_len) const {
+        for (const auto &w : writes) {
+            if (w.b == b &&
+                b_off < w.b_off + w.blob_length &&
+                w.b_off < b_off + b_len)
+                return true;
+        }
+        return false;
     }
 };
 

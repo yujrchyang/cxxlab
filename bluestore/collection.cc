@@ -45,7 +45,7 @@ OnodeRef OnodeSpace::add(const ghobject_t &oid, OnodeRef on) {
             lru_.push_front(oid);
             lru_map_[oid] = lru_.begin();
         }
-        return on;
+        return cache_[oid];
     }
 
     evict_if_needed();
@@ -132,7 +132,7 @@ OnodeRef Collection::create_onode(const ghobject_t &oid) {
     Onode *raw_on = new Onode(oid, key);
     raw_on->get();  // Initial reference
     raw_on->exists = true;
-    raw_on->onode.nid = oid.hash;  // Use hash as nid for simplicity
+    raw_on->onode.nid = 0;  // Assigned by _assign_nid during write
 
     OnodeRef ref(raw_on, OnodeDeleter{});
     return onode_space_.add(oid, ref);

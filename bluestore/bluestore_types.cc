@@ -55,7 +55,7 @@ void bluestore_blob_use_tracker_t::init(uint32_t full_length,
                                         uint32_t _au_size) {
     clear();
     au_size = _au_size;
-    uint32_t _num_au = full_length / _au_size;
+    uint32_t _num_au = (full_length + _au_size - 1) / _au_size;
     if (_num_au <= 1) {
         num_au = 0;
         total_bytes = 0;
@@ -103,6 +103,7 @@ bool bluestore_blob_use_tracker_t::put(uint32_t offset, uint32_t len,
         size_t pos = offset / au_size;
         uint32_t diff = std::min(au_size - phase, end - offset);
 
+        cxxlab_assert(bytes_per_au[pos] >= diff);
         bytes_per_au[pos] -= diff;
         offset += (phase ? au_size - phase : au_size);
 
@@ -134,7 +135,8 @@ bool bluestore_blob_use_tracker_t::can_split() const {
 }
 
 bool bluestore_blob_use_tracker_t::can_split_at(uint32_t blob_offset) const {
-    return blob_offset % au_size == 0;
+    cxxlab_assert(au_size);
+    return blob_offset % au_size == 0 && blob_offset < num_au * au_size;
 }
 
 void bluestore_blob_use_tracker_t::split(uint32_t blob_offset,
@@ -198,6 +200,7 @@ void bluestore_blob_t::allocated(uint32_t b_off, uint32_t length,
 void bluestore_blob_t::split(uint32_t blob_offset, bluestore_blob_t &rb) {
     rb.extents.clear();
     rb.logical_length = 0;
+    rb.flags = flags;
 
     uint32_t offset = 0;
     auto it = extents.begin();
@@ -208,7 +211,13 @@ void bluestore_blob_t::split(uint32_t blob_offset, bluestore_blob_t &rb) {
 
     if (it != extents.end() && offset < blob_offset) {
         uint32_t split_len = blob_offset - offset;
-        rb.extents.emplace_back(it->offset + split_len, it->length - split_len);
+        if (it->is_valid()) {
+            rb.extents.emplace_back(it->offset + split_len,
+                                    it->length - split_len);
+        } else {
+            rb.extents.emplace_back(pextent_t::INVALID_OFFSET,
+                                    it->length - split_len);
+        }
         it->length = split_len;
         ++it;
     }

@@ -16,7 +16,7 @@ struct BlueStoreConfig {
     uint64_t block_size = 4096;
     uint64_t max_blob_size = 262144;        // 256KB
     uint64_t prefer_deferred_size = 65536;  // 64KB, writes smaller than this use deferred path
-    uint8_t csum_type = 1;                  // CSUM_CRC32C
+    uint8_t csum_type = 4;                  // CSUM_CRC32C
 
     std::string freelist_type = "bitmap";
     std::string allocator_type = "bitmap";

@@ -11,9 +11,7 @@ BufferCache *Blob::get_cache() const {
 }
 
 void Blob::get_ref(uint32_t offset, uint32_t length, uint32_t min_alloc_size) {
-    if (blob_.get_logical_length() == 0) {
-        return;
-    }
+    cxxlab_assert(blob_.get_logical_length() != 0);
 
     if (used_in_blob_.is_empty()) {
         uint32_t min_release_size = min_alloc_size;
@@ -102,7 +100,12 @@ bool Blob::can_reuse_blob(uint32_t min_alloc_size, uint32_t target_blob_size,
 
         if (new_blen > blen) {
             blob_.add_tail(new_blen);
-            used_in_blob_.add_tail(new_blen, min_alloc_size);
+            uint32_t au = min_alloc_size;
+            if (blob_.has_csum()) {
+                au = std::max(min_alloc_size,
+                              blob_.get_csum_chunk_size());
+            }
+            used_in_blob_.add_tail(new_blen, au);
         }
     }
     return true;

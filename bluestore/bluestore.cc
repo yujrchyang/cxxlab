@@ -15,6 +15,7 @@
 #include "bluestore/freelist_manager.h"
 #include "common/denc.h"
 #include "common/object.h"
+#include "common/scope_guard.h"
 #include "kv/key_value_db.h"
 #include "kv/merge_op/xor_merge_op.h"
 
@@ -151,12 +152,12 @@ int BlueStore::mount(const BlueStoreConfig &cfg) {
     if (r < 0)
         goto out_close_alloc;
 
+    _finisher_start();
+    _kv_start();
+
     r = _deferred_replay();
     if (r < 0)
         goto out_close_alloc;
-
-    _finisher_start();
-    _kv_start();
 
     _init_logger();
     _refresh_perf_counters();
@@ -731,7 +732,8 @@ void BlueStore::_txc_finalize_kv(TransContext *txc, Transaction t) {
 
 void BlueStore::_txc_apply_kv(TransContext *txc) {
     if (!should_inject(cfg_.inject_kv_err_rate)) {
-        db_->submit_transaction_sync(txc->t);
+        int r = db_->submit_transaction_sync(txc->t);
+        cxxlab_assert(r == 0);
     }
     txc->set_state(TransContext::STATE_KV_SUBMITTED);
     {
@@ -745,8 +747,6 @@ void BlueStore::_txc_committed_kv(TransContext *txc) {
         std::lock_guard<std::mutex> lg(txc->osr->qlock);
         txc->set_state(TransContext::STATE_KV_DONE);
     }
-
-    _finish_write(txc);
 
     for (auto &fn : txc->on_commits) {
         _queue_finisher(std::move(fn));
@@ -794,6 +794,7 @@ void BlueStore::_txc_finish(TransContext *txc) {
     }
 
     for (auto *t : releasing) {
+        _finish_write(t);
         _txc_release_alloc(t);
         delete t;
     }
@@ -1641,7 +1642,8 @@ void BlueStore::_do_write_data(TransContext *txc, Collection *ch, OnodeRef o,
                                bufferlist &bl, WriteContext *wctx) {
     uint64_t end = offset + length;
 
-    if (offset / min_alloc_size_ == (end - 1) / min_alloc_size_) {
+    if (length != min_alloc_size_ &&
+        offset / min_alloc_size_ == (end - 1) / min_alloc_size_) {
         _do_write_small(txc, ch, o, offset, length, bl, wctx);
         return;
     }
@@ -1738,7 +1740,7 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
                         static_cast<uint32_t>(offset),
                         static_cast<uint32_t>(b_off + head_pad),
                         static_cast<uint32_t>(length), ep->blob,
-                        &wctx->old_extents);
+                        &wctx->old_extents, min_alloc_size_);
                     ep->blob->dirty_blob().mark_used(le->blob_offset,
                                                      le->length);
                     return;
@@ -1801,7 +1803,7 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
                             static_cast<uint32_t>(offset),
                             static_cast<uint32_t>(offset - bstart),
                             static_cast<uint32_t>(length), ep->blob,
-                            &wctx->old_extents);
+                            &wctx->old_extents, min_alloc_size_);
                         ep->blob->dirty_blob().mark_used(le->blob_offset,
                                                          le->length);
                         return;
@@ -1811,7 +1813,8 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
                 uint64_t b_off_reuse = offset - bstart;
                 uint32_t alloc_len32 = alloc_len;
                 if (ep->blob->can_reuse_blob(min_alloc_size_, max_bsize,
-                                             b_off_reuse, &alloc_len32)) {
+                                             b_off_reuse, &alloc_len32) &&
+                    !wctx->has_conflict(ep->blob, b_off_reuse, alloc_len32)) {
                     o->extent_map.punch_hole(offset, length,
                                              &wctx->old_extents);
 
@@ -1836,7 +1839,8 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
                 uint64_t b_off = offset - bstart;
                 uint32_t alloc_len32 = alloc_len;
                 if (prev_ep->blob->can_reuse_blob(min_alloc_size_, max_bsize,
-                                                  b_off, &alloc_len32)) {
+                                                   b_off, &alloc_len32) &&
+                    !wctx->has_conflict(prev_ep->blob, b_off, alloc_len32)) {
                     o->extent_map.punch_hole(offset, length,
                                              &wctx->old_extents);
 
@@ -1871,8 +1875,8 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
     b->get();
     b->set_collection(ch);
 
-    wctx->write(offset, b, alloc_len, b_off0, padded_bl, b_off, length, true,
-                min_alloc_size_ != block_size_);
+    wctx->write(offset, b, alloc_len, b_off0, padded_bl, b_off, length,
+                min_alloc_size_ != block_size_, true);
     if (perf_) {
         perf_->inc(l_bluestore_write_small);
         perf_->inc(l_bluestore_write_small_bytes, length);
@@ -2015,7 +2019,7 @@ void BlueStore::_do_write_big(TransContext *txc, Collection *ch, OnodeRef o,
             b_off = 0;
         }
 
-        wctx->write(offset, b, l, b_off, chunk_bl, b_off, l, new_blob, false);
+        wctx->write(offset, b, l, b_off, chunk_bl, b_off, l, false, new_blob);
 
         if (perf_) {
             perf_->inc(l_bluestore_write_big);
@@ -2335,7 +2339,7 @@ void BlueStore::_do_write_big_apply_deferred(
         static_cast<uint32_t>(dctx.off),
         static_cast<uint32_t>(dctx.off - dctx.blob_start),
         static_cast<uint32_t>(dctx.used), dctx.blob_ref,
-        &wctx->old_extents);
+        &wctx->old_extents, min_alloc_size_);
     dctx.blob_ref->dirty_blob().mark_used(le->blob_offset, le->length);
     bluestore_deferred_op_t *op = _get_deferred_op(txc, out.length());
     op->op = bluestore_deferred_op_t::OP_WRITE;
@@ -2460,6 +2464,14 @@ int BlueStore::_fsck(FSCKDepth depth, bool repair,
     bdev_.swap(fsck_bdev);
     fm_ = fsck_fm;
 
+    auto guard = make_scope_guard([&] {
+        db_.swap(fsck_db);
+        if (bdev_) bdev_->close();
+        bdev_.swap(fsck_bdev);
+        if (fm_) delete fm_;
+        fm_ = original_fm;
+    });
+
     errors += _fsck_check_collections(depth, cb);
 
     std::set<uint64_t> used_blocks;
@@ -2471,16 +2483,6 @@ int BlueStore::_fsck(FSCKDepth depth, bool repair,
             repaired = errors;
         }
     }
-
-    db_.swap(fsck_db);
-    if (bdev_) {
-        bdev_->close();
-    }
-    bdev_.swap(fsck_bdev);
-    if (fm_) {
-        delete fm_;
-    }
-    fm_ = original_fm;
 
     return repair ? (errors - repaired) : errors;
 }

@@ -91,10 +91,8 @@ public:
 
     uint64_t get_max_bytes() const { return max_bytes_; }
     void set_max_bytes(uint64_t max) {
-        {
-            std::lock_guard<std::mutex> l(lock_);
-            max_bytes_ = max;
-        }
+        std::lock_guard<std::mutex> l(lock_);
+        max_bytes_ = max;
         trim();
     }
     uint64_t get_cur_bytes() const { return cur_bytes_; }

@@ -15,6 +15,13 @@ void BufferSpace::_discard(BufferCache *cache, uint32_t offset,
             ++it;
             continue;
         }
+        // Partial overlap: preserve head before discard range
+        if (b->offset < offset) {
+            b->length = offset - b->offset;
+            ++it;
+            continue;
+        }
+        // Fully inside discard range: remove
         if (b->is_writing()) {
             writing_.remove(b);
         }
@@ -41,7 +48,10 @@ void BufferSpace::write(BufferCache *cache, uint64_t seq, uint32_t offset,
     buffer_map_[offset] = std::move(b);
     writing_.push_back(bp);
 
-    if (cache) cache->add(bp);
+    if (cache) {
+        cache->add(bp);
+        cache->trim();
+    }
 }
 
 void BufferSpace::finish_write(BufferCache *cache, uint64_t seq) {
@@ -98,8 +108,15 @@ bool BufferSpace::read(BufferCache *cache, uint32_t offset, uint32_t length,
     std::unique_lock<std::mutex> lk;
     if (cache) lk = std::unique_lock<std::mutex>(cache->lock());
 
-    auto it = buffer_map_.find(offset);
-    if (it == buffer_map_.end()) {
+    // Use lower_bound to find buffer containing offset (not just exact match)
+    auto it = buffer_map_.lower_bound(offset);
+    if (it != buffer_map_.begin()) {
+        auto prev = std::prev(it);
+        if (prev->second->offset + prev->second->length > offset) {
+            it = prev;
+        }
+    }
+    if (it == buffer_map_.end() || it->second->offset > offset) {
         if (cache) cache->record_miss(length);
         return false;
     }
