@@ -4,6 +4,7 @@
 #include <bit>
 #include <cerrno>
 #include <chrono>
+#include <iostream>
 #include <random>
 #include <sstream>
 
@@ -1723,17 +1724,32 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
                     ep->blob->get_blob().is_allocated(b_off, b_len)) {
                     bufferlist padded_bl = bl;
                     _apply_padding(head_pad, tail_pad, padded_bl);
-                    _buffer_cache_write(txc, ep->blob, b_off, padded_bl, 0);
-                    bluestore_deferred_op_t *op =
-                        _get_deferred_op(txc, padded_bl.length());
-                    op->op = bluestore_deferred_op_t::OP_WRITE;
-                    ep->blob->get_blob().map(
-                        b_off, b_len, [&](uint64_t off, uint64_t len) {
-                            op->extents.emplace_back(
-                                bluestore_pextent_t(off, len));
-                            return 0;
-                        });
-                    op->data = padded_bl;
+                    unsigned flags = wctx->buffered ? 0 : Buffer::FLAG_NOCACHE;
+                    _buffer_cache_write(txc, ep->blob, b_off, padded_bl, flags);
+                    
+                    if (padded_bl.length() < cfg_.prefer_deferred_size) {
+                        bluestore_deferred_op_t *op =
+                            _get_deferred_op(txc, padded_bl.length());
+                        op->op = bluestore_deferred_op_t::OP_WRITE;
+                        ep->blob->get_blob().map(
+                            b_off, b_len, [&](uint64_t off, uint64_t len) {
+                                op->extents.emplace_back(
+                                    bluestore_pextent_t(off, len));
+                                return 0;
+                            });
+                        op->data = padded_bl;
+                    } else {
+                        uint64_t data_off = 0;
+                        ep->blob->get_blob().map(
+                            b_off, b_len, [&](uint64_t off, uint64_t len) {
+                                bufferlist chunk_bl;
+                                chunk_bl.substr_of(padded_bl, data_off, len);
+                                bdev_->aio_write(off, chunk_bl, &txc->ioc, false);
+                                data_off += len;
+                                return 0;
+                            });
+                    }
+                    
                     ep->blob->dirty_blob().calc_csum(b_off, padded_bl,
                                                      block_size_);
                     auto le = o->extent_map.set_lextent(
@@ -1783,8 +1799,9 @@ void BlueStore::_do_write_small(TransContext *txc, Collection *ch,
                             }
                             padded_bl.claim_append(tail_bl);
                         }
+                        unsigned flags = wctx->buffered ? 0 : Buffer::FLAG_NOCACHE;
                         _buffer_cache_write(txc, ep->blob, b_off,
-                                            padded_bl, 0);
+                                            padded_bl, flags);
                         ep->blob->dirty_blob().calc_csum(b_off,
                                                          padded_bl,
                                                          block_size_);
@@ -2147,7 +2164,8 @@ int BlueStore::_do_alloc_write(TransContext *txc, OnodeRef o,
         o->extent_map.set_lextent(wi.logical_offset, wi.b_off0, wi.length0, b,
                                   nullptr);
 
-        _buffer_cache_write(txc, b, wi.b_off0, wi.bl, 0);
+        unsigned flags = wctx->buffered ? 0 : Buffer::FLAG_NOCACHE;
+        _buffer_cache_write(txc, b, wi.b_off0, wi.bl, flags);
 
         if (wi.bl.length() > 0) {
             uint64_t phys_off = _blob_to_phys(dblob, wi.b_off);
@@ -2333,7 +2351,8 @@ void BlueStore::_do_write_big_apply_deferred(
         }
         out.claim_append(tail_bl);
     }
-    _buffer_cache_write(txc, dctx.blob_ref, dctx.b_off, out, 0);
+    unsigned flags = wctx->buffered ? 0 : Buffer::FLAG_NOCACHE;
+    _buffer_cache_write(txc, dctx.blob_ref, dctx.b_off, out, flags);
     dctx.blob_ref->dirty_blob().calc_csum(dctx.b_off, out, block_size_);
     auto le = o->extent_map.set_lextent(
         static_cast<uint32_t>(dctx.off),
@@ -2534,6 +2553,7 @@ int64_t BlueStore::_fsck_check_objects(FSCKDepth depth,
                                        std::set<uint64_t> &used_blocks,
                                        FsckProgressCallback cb) {
     int64_t errors = 0;
+    bool live_mode = mounted_ && db_ && bdev_ && fm_;
 
     // Use cfg_.min_alloc_size as fallback if min_alloc_size_ is not set
     uint64_t min_alloc = min_alloc_size_ > 0 ? min_alloc_size_ : cfg_.min_alloc_size;
@@ -2589,11 +2609,25 @@ int64_t BlueStore::_fsck_check_objects(FSCKDepth depth,
         }
 
         // Check extents and track used blocks
+        std::map<BlobRef, bluestore_blob_use_tracker_t> ref_map;
         for (const auto &ext : on.extent_map) {
             if (!ext.blob) {
                 errors++;
                 continue;
             }
+
+            // Build reference map for this blob
+            auto &tracker = ref_map[ext.blob];
+            if (tracker.au_size == 0) {
+                const auto &blob = ext.blob->get_blob();
+                uint32_t min_release_size = min_alloc;
+                if (blob.has_csum()) {
+                    min_release_size = std::max(min_release_size, 
+                                                static_cast<uint32_t>(blob.get_csum_chunk_size()));
+                }
+                tracker.init(blob.get_logical_length(), min_release_size);
+            }
+            tracker.get(ext.blob_offset, ext.length);
 
             const auto &blob = ext.blob->get_blob();
             for (const auto &pext : blob.get_extents()) {
@@ -2631,6 +2665,13 @@ int64_t BlueStore::_fsck_check_objects(FSCKDepth depth,
                 }
             }
         }
+
+        // NOTE: use_tracker validation is not performed here because
+        // bluestore_blob_use_tracker_t is runtime-only state (not serialized
+        // via DENC). FSCK decodes onodes from KV, so decoded blobs have
+        // empty use_trackers, making comparison meaningless.
+        // Proper validation requires access to live in-memory Blob objects
+        // from Collection's OnodeSpace, which is a separate code path.
 
         it->next();
         ++processed;

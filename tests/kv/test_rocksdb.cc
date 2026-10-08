@@ -364,6 +364,62 @@ TEST_F(RocksDBStoreTest, EstimatedSize) {
     EXPECT_GT(size, 0);
 }
 
+// ── rmkeys_by_prefix threshold regression ──────────────────────
+
+class RocksDBStoreThresholdTest : public ::testing::Test {
+protected:
+    std::unique_ptr<KeyValueDB> db;
+    std::string dbpath_;
+
+    void SetUp() override {
+        dbpath_ = tmpdir();
+        ASSERT_FALSE(dbpath_.empty());
+        std::map<std::string, std::string> opts;
+        opts["delete_range_threshold"] = "10";
+        db = KeyValueDB::create("rocksdb", dbpath_, opts);
+        ASSERT_NE(db, nullptr);
+        ASSERT_EQ(db->create_and_open(std::cerr), 0);
+    }
+
+    void TearDown() override {
+        db->close();
+        std::filesystem::remove_all(dbpath_);
+    }
+
+    void set(const std::string &prefix, const std::string &key,
+             const std::string &value) {
+        auto t = db->get_transaction();
+        t->set(prefix, key, to_bl(value));
+        ASSERT_EQ(db->submit_transaction_sync(t), 0);
+    }
+
+    std::optional<std::string> get(const std::string &prefix,
+                                    const std::string &key) {
+        bufferlist bl;
+        int r = db->get(prefix, key, &bl);
+        if (r != 0) return std::nullopt;
+        return bl.to_str();
+    }
+};
+
+TEST_F(RocksDBStoreThresholdTest, RmkeysByPrefixDoesNotAffectOtherPrefixes) {
+    set("A", "k1", "val_a1");
+    set("A", "k2", "val_a2");
+    set("O", "k1", "val_o1");
+    set("O", "k2", "val_o2");
+
+    {
+        auto t = db->get_transaction();
+        t->rmkeys_by_prefix("O");
+        ASSERT_EQ(db->submit_transaction_sync(t), 0);
+    }
+
+    EXPECT_EQ(get("A", "k1").value_or(""), "val_a1");
+    EXPECT_EQ(get("A", "k2").value_or(""), "val_a2");
+    EXPECT_FALSE(get("O", "k1").has_value());
+    EXPECT_FALSE(get("O", "k2").has_value());
+}
+
 }  // namespace
 
 // ── Key encoding roundtrip (static, no DB needed) ─────────────

@@ -763,41 +763,27 @@ bool buffer::list::contents_equal(const buffer::list &other) const {
     if (length() != other.length())
         return false;
 
-    if (true) {
-        auto a = std::cbegin(_buffers);
-        auto b = std::cbegin(other._buffers);
-        unsigned aoff = 0, boff = 0;
-        while (a != std::cend(_buffers)) {
-            unsigned len = a->length() - aoff;
-            if (len > b->length() - boff)
-                len = b->length() - boff;
-            if (memcmp(a->c_str() + aoff, b->c_str() + boff, len) != 0)
-                return false;
-            aoff += len;
-            if (aoff == a->length()) {
-                aoff = 0;
-                ++a;
-            }
-            boff += len;
-            if (boff == b->length()) {
-                boff = 0;
-                ++b;
-            }
+    auto a = std::cbegin(_buffers);
+    auto b = std::cbegin(other._buffers);
+    unsigned aoff = 0, boff = 0;
+    while (a != std::cend(_buffers)) {
+        unsigned len = a->length() - aoff;
+        if (len > b->length() - boff)
+            len = b->length() - boff;
+        if (memcmp(a->c_str() + aoff, b->c_str() + boff, len) != 0)
+            return false;
+        aoff += len;
+        if (aoff == a->length()) {
+            aoff = 0;
+            ++a;
         }
-        return true;
-    }
-
-    if (false) {
-        bufferlist::const_iterator me = begin();
-        bufferlist::const_iterator him = other.begin();
-        while (!me.end()) {
-            if (*me != *him)
-                return false;
-            ++me;
-            ++him;
+        boff += len;
+        if (boff == b->length()) {
+            boff = 0;
+            ++b;
         }
-        return true;
     }
+    return true;
 }
 
 bool buffer::list::contents_equal(const void *const other,
@@ -1391,7 +1377,9 @@ ssize_t buffer::list::pread_file(const char *fn, uint64_t off, uint64_t len, std
     }
     ssize_t ret = lseek64(fd, off, SEEK_SET);
     if (ret != (ssize_t)off) {
-        return -errno;
+        int saved_errno = errno;
+        VOID_TEMP_FAILURE_RETRY(::close(fd));
+        return -saved_errno;
     }
 
     ret = read_fd(fd, len);

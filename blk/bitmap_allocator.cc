@@ -76,7 +76,7 @@ public:
     bool _is_empty_l0(uint64_t l0_start, uint64_t l0_end);
     bool _is_empty_l1(uint64_t l1_start, uint64_t l1_end);
 
-    int _allocate_l0(uint64_t length, uint64_t max_length,
+    int _allocate_l0(uint64_t length, uint64_t min_length, uint64_t max_length,
                      uint64_t l0_start, uint64_t l0_end,
                      uint64_t *allocated, PExtentVector *res);
 
@@ -87,7 +87,8 @@ public:
     static void _fragment_and_emplace(uint64_t max_length,
                                       uint64_t offset, uint64_t len,
                                       uint64_t *allocated,
-                                      PExtentVector *res);
+                                      PExtentVector *res,
+                                      uint64_t min_length = 0);
 
     void collect_stats(std::map<size_t, size_t> &bins_overall);
 
@@ -284,7 +285,7 @@ bool AllocatorLevel01Loose::_is_empty_l1(
 }
 
 int AllocatorLevel01Loose::_allocate_l0(
-    uint64_t length, uint64_t max_length,
+    uint64_t length, uint64_t min_length, uint64_t max_length,
     uint64_t l0_start, uint64_t l0_end,
     uint64_t *allocated, PExtentVector *res) {
     uint64_t need = length / l0_granularity;
@@ -321,7 +322,7 @@ int AllocatorLevel01Loose::_allocate_l0(
         uint64_t units = std::min(run_end - run_start, need);
         uint64_t bytes = units * l0_granularity;
         _fragment_and_emplace(max_length, run_start * l0_granularity,
-                              bytes, allocated, res);
+                              bytes, allocated, res, min_length);
         _mark_alloc_l0(run_start, run_start + units);
         need -= units;
         p = run_start + units;
@@ -333,7 +334,6 @@ int AllocatorLevel01Loose::_allocate_l1(
     uint64_t length, uint64_t min_length, uint64_t max_length,
     uint64_t l1_start, uint64_t l1_end,
     uint64_t *allocated, PExtentVector *res) {
-    (void)min_length;
     uint64_t l0_per_entry = bits_per_slotset;
 
     for (uint64_t p = l1_start; p < l1_end; ++p) {
@@ -352,19 +352,20 @@ int AllocatorLevel01Loose::_allocate_l1(
         if (ent == L1_ENTRY_FREE && rem >= l0_per_entry * l0_granularity) {
             uint64_t alloc_len = l0_per_entry * l0_granularity;
             _fragment_and_emplace(max_length, l0s * l0_granularity,
-                                  alloc_len, allocated, res);
+                                  alloc_len, allocated, res, min_length);
             _mark_alloc_l1_l0(l0s, l0e);
             continue;
         }
 
-        _allocate_l0(rem, max_length, l0s, l0e, allocated, res);
+        _allocate_l0(rem, min_length, max_length, l0s, l0e, allocated, res);
+        _mark_l1_on_l0(l0s, l0e);
     }
     return *allocated >= length ? 0 : -ENOSPC;
 }
 
 void AllocatorLevel01Loose::_fragment_and_emplace(
     uint64_t max_length, uint64_t offset, uint64_t len,
-    uint64_t *allocated, PExtentVector *res) {
+    uint64_t *allocated, PExtentVector *res, uint64_t min_length) {
     if (!res->empty()) {
         auto &last = res->back();
         if (last.offset + last.length == offset) {
@@ -385,6 +386,11 @@ void AllocatorLevel01Loose::_fragment_and_emplace(
     }
     while (len > 0) {
         uint64_t chunk = (max_length > 0 && len > max_length) ? max_length : len;
+        // Ensure chunk meets min_length requirement
+        if (min_length > 0 && chunk < min_length) {
+            // Chunk too small, don't create it
+            break;
+        }
         cxxlab_assert(chunk <= std::numeric_limits<uint32_t>::max());
         res->emplace_back(offset, static_cast<uint32_t>(chunk));
         if (allocated) *allocated += chunk;

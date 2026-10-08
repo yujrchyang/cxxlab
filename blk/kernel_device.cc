@@ -6,6 +6,7 @@
 
 #include <fcntl.h>
 #include <linux/fs.h>
+#include <sys/file.h>
 #include <sys/ioctl.h>
 #include <sys/uio.h>
 #include <unistd.h>
@@ -88,11 +89,25 @@ int KernelDevice::open(const std::string &path) {
         return -saved;
     }
 
+    // Acquire exclusive lock to prevent concurrent access
+    if (::flock(fd_direct_, LOCK_EX | LOCK_NB) < 0) {
+        int saved = errno;
+        ::close(fd_direct_);
+        ::close(fd_buffered_);
+        fd_direct_ = fd_buffered_ = -1;
+        return -saved;
+    }
+
     size = _get_device_size(fd_direct_);
     block_size = _get_block_size(fd_direct_);
     optimal_io_size = _get_optimal_io_size(fd_direct_);
     rotational = _is_rotational(fd_direct_);
     support_discard_ = _supports_discard(fd_direct_);
+
+    // Align size down to block boundary to avoid I/O errors at device end
+    if (size > 0 && block_size > 0) {
+        size = (size / block_size) * block_size;
+    }
 
     unsigned iodepth = std::max(16u, std::min(128u, (unsigned)(size / block_size / 4)));
     if (iodepth < 16)

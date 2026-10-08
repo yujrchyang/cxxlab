@@ -285,7 +285,7 @@ TEST_F(OnodeCollectionTest, CollectionCreateOnode) {
     EXPECT_NE(on, nullptr);
     EXPECT_TRUE(on->exists);
     EXPECT_EQ(on->oid, oid);
-    EXPECT_EQ(on->onode.nid, 0x1234u);
+    EXPECT_EQ(on->onode.nid, 0u);  // nid assigned by _assign_nid during write
 }
 
 TEST_F(OnodeCollectionTest, CollectionGetOnodeCacheHit) {

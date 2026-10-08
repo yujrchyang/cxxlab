@@ -527,8 +527,8 @@ TEST_F(BlueRocksEnvTest, GetFileModificationTime) {
 
     uint64_t mtime = 0;
     ASSERT_TRUE(env_->GetFileModificationTime(fname, &mtime).ok());
-    // mtime is 0 in our simplified BlueFS
-    ASSERT_EQ(mtime, 0);
+    // mtime should be set after file write (steady_clock nanoseconds)
+    ASSERT_GT(mtime, 0u);
 }
 
 TEST_F(BlueRocksEnvTest, NewDirectory) {

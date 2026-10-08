@@ -322,9 +322,10 @@ private:
     void _flush_bdev(FileWriter *h);
     void _flush_special(FileWriter *h);
     int _flush_data(FileWriter *h, uint64_t offset, uint64_t length,
-                    bool buffered);
+                    bufferlist &bl, bool buffered);
     int _flush_F(FileWriter *h, bool force);
-    int _flush_range_F(FileWriter *h, uint64_t offset, uint64_t length);
+    int _flush_range_F(FileWriter *h, uint64_t offset, uint64_t length,
+                       bufferlist *bl = nullptr);
 
     // 读取
     int64_t _read(FileReader *h, uint64_t off, size_t len, bufferlist *outbl,

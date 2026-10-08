@@ -191,6 +191,38 @@ void bluestore_blob_use_tracker_t::add_tail(uint32_t new_len, uint32_t _au_size)
     }
 }
 
+bool bluestore_blob_use_tracker_t::equal(
+    const bluestore_blob_use_tracker_t &other) const {
+    if (!num_au && !other.num_au) {
+        return total_bytes == other.total_bytes && au_size == other.au_size;
+    } else if (num_au && other.num_au) {
+        if (num_au != other.num_au || au_size != other.au_size) {
+            return false;
+        }
+        for (size_t i = 0; i < num_au; i++) {
+            if (bytes_per_au[i] != other.bytes_per_au[i]) {
+                return false;
+            }
+        }
+        return true;
+    }
+
+    uint32_t n = num_au ? num_au : other.num_au;
+    uint32_t referenced =
+        num_au ? other.get_referenced_bytes() : get_referenced_bytes();
+    auto bytes_per_au_tmp = num_au ? bytes_per_au : other.bytes_per_au;
+
+    if (referenced != 0 || au_size != other.au_size) {
+        return false;
+    }
+    for (uint32_t i = 0; i < n; i++) {
+        if (bytes_per_au_tmp[i] != 0) {
+            return false;
+        }
+    }
+    return true;
+}
+
 void bluestore_blob_t::allocated(uint32_t b_off, uint32_t length,
                                  const PExtentVector &allocs) {
     extents = allocs;

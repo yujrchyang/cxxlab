@@ -1,6 +1,7 @@
 #include "bluefs/bluefs.h"
 
 #include <cerrno>
+#include <chrono>
 #include <iostream>
 
 #include "blk/block_device.h"
@@ -358,26 +359,28 @@ bufferlist BlueFS::FileWriter::flush_buffer(uint64_t block_size,
     // Move the current buffer content
     buffer.splice(0, buffer.length(), &bl);
 
-    // Save unaligned tail for next write (ensures O_DIRECT alignment)
-    if (bl.length() & ~block_mask) {
-        uint64_t tail = bl.length() & ~block_mask;
-        bl.splice(bl.length() - tail, tail, &tail_block);
-    } else {
-        tail_block.clear();
+    // If unaligned, pad with zeros to make it block-aligned (skip for buffered IO)
+    if (block_size > 1) {
+        uint64_t tail = bl.length() & block_mask;
+        if (tail) {
+            uint64_t padding_len = block_size - tail;
+            bufferlist padding;
+            padding.append_zero(padding_len);
+            bl.claim_append(padding);
+        }
     }
+    tail_block.clear();
 
     return bl;
 }
 
 int BlueFS::_flush_data(FileWriter *h, uint64_t offset, uint64_t length,
-                        bool buffered) {
+                        bufferlist &bl, bool buffered) {
     auto &fnode = h->file->fnode;
 
     if (length == 0) {
         return 0;
     }
-
-    bufferlist &bl = h->buffer;
 
     uint64_t x_off = 0;
     auto it = fnode.seek(offset, &x_off);
@@ -407,8 +410,6 @@ int BlueFS::_flush_data(FileWriter *h, uint64_t offset, uint64_t length,
         ++it;
     }
 
-    h->pos += length;
-    h->file->fnode.size = std::max(h->file->fnode.size, h->pos);
     return 0;
 }
 
@@ -422,14 +423,21 @@ int BlueFS::_flush_F(FileWriter *h, bool force) {
         return 0;
     }
 
-    int r = _flush_range_F(h, h->pos, length);
-    if (r == 0) {
-        h->buffer.clear();
+    uint64_t block_size = cfg_.buffered_io ? 1 : 
+        (bdev_[0] ? bdev_[0]->get_block_size() : 4096);
+    uint64_t block_mask = block_size - 1;
+    bufferlist bl = h->flush_buffer(block_size, block_mask);
+    
+    if (bl.length() == 0) {
+        return 0;
     }
+
+    int r = _flush_range_F(h, h->pos, length, &bl);
     return r;
 }
 
-int BlueFS::_flush_range_F(FileWriter *h, uint64_t offset, uint64_t length) {
+int BlueFS::_flush_range_F(FileWriter *h, uint64_t offset, uint64_t length,
+                           bufferlist *bl) {
     if (h->file->deleted) return 0;
     if (offset + length <= h->pos) {
         return 0;
@@ -439,11 +447,15 @@ int BlueFS::_flush_range_F(FileWriter *h, uint64_t offset, uint64_t length) {
         offset = h->pos;
     }
 
+    // For direct I/O, the buffer may be padded to block alignment.
+    // Allocate for the padded size, but track file size with original size.
+    uint64_t write_length = (bl && bl->length() > length) ? bl->length() : length;
+    
     uint64_t allocated = h->file->fnode.get_allocated();
-    if (allocated < offset + length) {
+    if (allocated < offset + write_length) {
         int r = _allocate(
             vselector_->select_prefer_bdev(h->file->vselector_hint),
-            offset + length - allocated, 0, &h->file->fnode);
+            offset + write_length - allocated, 0, &h->file->fnode);
         if (r < 0) {
             return r;
         }
@@ -460,9 +472,13 @@ int BlueFS::_flush_range_F(FileWriter *h, uint64_t offset, uint64_t length) {
         h->file->is_dirty = true;
     }
 
-    bool buffered = cfg_.buffered_io;
-    int r = _flush_data(h, offset, length, buffered);
-    return r;
+    if (bl && bl->length() > 0) {
+        bool buffered = cfg_.buffered_io;
+        int r = _flush_data(h, offset, bl->length(), *bl, buffered);
+        if (r < 0) return r;
+    }
+    h->pos += length;
+    return 0;
 }
 
 // =====================================================================
@@ -629,12 +645,21 @@ int BlueFS::_flush_and_sync_log(uint64_t want_seq) {
 int BlueFS::_maybe_extend_log() {
     auto &fnode = log_.writer->file->fnode;
     uint64_t pos = log_.writer->pos;
-    if (pos + cfg_.min_log_runway < fnode.allocated) {
+    
+    // Consider the size of the current transaction
+    size_t expected_log_size = 0;
+    log_.t.bound_encode(expected_log_size);
+    
+    // Check if there's enough space for current transaction + minimum runway
+    if (pos + expected_log_size + cfg_.min_log_runway < fnode.allocated) {
         return 0;
     }
 
+    // Need to extend: allocate enough for transaction + max runway
     uint64_t alloc_len = p2roundup(
-        std::max(cfg_.min_log_runway, cfg_.max_log_runway), cfg_.alloc_size);
+        std::max(cfg_.min_log_runway, 
+                 static_cast<uint64_t>(expected_log_size + cfg_.max_log_runway)),
+        cfg_.alloc_size);
     uint8_t prefer = vselector_->select_prefer_bdev(
         vselector_->get_hint_for_log());
     uint64_t hint = 0;
@@ -840,12 +865,12 @@ int BlueFS::_replay(bool no_stdout) {
                 bluefs_fnode_t fnode;
                 decode(fnode, op_p);
                 auto file = _get_file(fnode.ino);
-                if (vselector_ && file->vselector_hint) {
+                if (vselector_ && file->vselector_hint && fnode.ino != 1) {
                     vselector_->sub_usage(file->vselector_hint,
                                           file->fnode);
                 }
                 file->fnode = fnode;
-                if (vselector_ && file->vselector_hint) {
+                if (vselector_ && file->vselector_hint && fnode.ino != 1) {
                     vselector_->add_usage(file->vselector_hint,
                                           file->fnode);
                 }
@@ -858,9 +883,17 @@ int BlueFS::_replay(bool no_stdout) {
                 decode(delta, op_p);
                 auto file = _get_file(delta.ino);
                 cxxlab_assert(delta.offset == file->fnode.allocated);
+                if (vselector_ && file->vselector_hint && delta.ino != 1) {
+                    vselector_->sub_usage(file->vselector_hint,
+                                          file->fnode);
+                }
                 file->fnode.mtime = delta.mtime;
                 file->fnode.size = delta.size;
                 file->fnode.claim_extents(delta.extents);
+                if (vselector_ && file->vselector_hint && delta.ino != 1) {
+                    vselector_->add_usage(file->vselector_hint,
+                                          file->fnode);
+                }
                 if (delta.ino > ino_last_) ino_last_ = delta.ino;
                 break;
             }
@@ -871,11 +904,11 @@ int BlueFS::_replay(bool no_stdout) {
                 std::lock_guard l(nodes_.lock);
                 auto fit = nodes_.file_map.find(ino);
                 if (fit != nodes_.file_map.end()) {
-                    if (fit->second->refs > 0) {
-                        fit->second->deleted = true;
-                    } else {
-                        nodes_.file_map.erase(fit);
+                    if (vselector_ && fit->second->vselector_hint) {
+                        vselector_->sub_usage(fit->second->vselector_hint,
+                                              fit->second->fnode);
                     }
+                    nodes_.file_map.erase(fit);
                 }
                 break;
             }
@@ -1045,6 +1078,12 @@ void BlueFS::umount(bool avoid_compact) {
     if (log_.writer) {
         _flush_and_sync_log();
         _flush_bdev(log_.writer);
+        
+        // Perform log compaction if not avoided
+        if (!avoid_compact) {
+            _maybe_compact_log();
+        }
+        
         super_.log_fnode = _get_file(1)->fnode;
         int r = _write_super(BDEV_DB);
         if (r < 0) {
@@ -1432,7 +1471,8 @@ int BlueFS::open_for_write(std::string_view dirname,
             // else: overwrite in place, keep existing extents
         }
 
-        file->fnode.mtime = 0;  // simplified: use 0 (no clock dependency)
+        file->fnode.mtime = std::chrono::duration_cast<std::chrono::nanoseconds>(
+            std::chrono::steady_clock::now().time_since_epoch()).count();
         log_.t.op_file_update(file->fnode);
         if (create) {
             log_.t.op_dir_link(dirname, filename, file->fnode.ino);
@@ -1673,12 +1713,14 @@ int BlueFS::_compact_log_async() {
         // Write compacted data to new log extents
         log_.writer->buffer.clear();
         log_.writer->buffer.append(compacted_bl);
-        ret = _flush_data(log_.writer, 0, compacted_bl.length(), false);
+        ret = _flush_data(log_.writer, 0, compacted_bl.length(),
+                          log_.writer->buffer, false);
         if (ret < 0) {
             log_.writer->buffer.clear();
             log_is_compacting_ = false;
             return ret;
         }
+        log_.writer->pos += compacted_bl.length();
         log_.writer->buffer.clear();
         _flush_bdev(log_.writer);
 

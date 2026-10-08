@@ -132,6 +132,8 @@ struct bluestore_blob_use_tracker_t {
     void split(uint32_t blob_offset, bluestore_blob_use_tracker_t *r);
     void add_tail(uint32_t new_len, uint32_t _au_size);
 
+    bool equal(const bluestore_blob_use_tracker_t &other) const;
+
     void bound_encode(size_t &p) const {
         denc(au_size, p);
         if (au_size) {

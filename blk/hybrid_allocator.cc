@@ -43,19 +43,43 @@ int64_t HybridAllocator::allocate(uint64_t want, uint64_t unit,
 
     uint64_t allocated = 0;
     std::lock_guard l(lock_);
-    PExtentVector avl_extents;
-    int64_t r = _allocate(want, unit, max_alloc_size, hint, &avl_extents);
-    if (r > 0) {
-        allocated = static_cast<uint64_t>(r);
-        extents->insert(extents->end(), avl_extents.begin(), avl_extents.end());
-    }
-    if (allocated < want) {
+    
+    // Try bitmap first for small allocations to avoid fragmenting AVL tree
+    // Condition: bitmap exists, has free space, and requested size is smaller
+    // than the smallest available extent in AVL
+    bool try_bitmap_first = child_ && child_->get_free() > 0 &&
+                            want < _lowest_size_available();
+    
+    if (try_bitmap_first) {
         PExtentVector child_extents;
-        r = child_->allocate(want - allocated, unit,
-                             max_alloc_size, hint, &child_extents);
+        int64_t r = child_->allocate(want, unit, max_alloc_size, hint, &child_extents);
         if (r > 0) {
-            allocated += static_cast<uint64_t>(r);
+            allocated = static_cast<uint64_t>(r);
             extents->insert(extents->end(), child_extents.begin(), child_extents.end());
+        }
+        if (allocated < want) {
+            PExtentVector avl_extents;
+            r = _allocate(want - allocated, unit, max_alloc_size, hint, &avl_extents);
+            if (r > 0) {
+                allocated += static_cast<uint64_t>(r);
+                extents->insert(extents->end(), avl_extents.begin(), avl_extents.end());
+            }
+        }
+    } else {
+        PExtentVector avl_extents;
+        int64_t r = _allocate(want, unit, max_alloc_size, hint, &avl_extents);
+        if (r > 0) {
+            allocated = static_cast<uint64_t>(r);
+            extents->insert(extents->end(), avl_extents.begin(), avl_extents.end());
+        }
+        if (allocated < want) {
+            PExtentVector child_extents;
+            r = child_->allocate(want - allocated, unit,
+                                 max_alloc_size, hint, &child_extents);
+            if (r > 0) {
+                allocated += static_cast<uint64_t>(r);
+                extents->insert(extents->end(), child_extents.begin(), child_extents.end());
+            }
         }
     }
     return allocated ? static_cast<int64_t>(allocated) : -ENOSPC;

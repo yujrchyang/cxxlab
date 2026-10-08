@@ -246,8 +246,11 @@ int MemDB::submit_transaction(Transaction t) {
             break;
         case OpType::MERGE: {
             if (perf_) perf_->inc(l_kv_merge_count);
-            _merge(op.prefix, encode_key(op.prefix, op.key),
-                   op.value);
+            int r = _merge(op.prefix, encode_key(op.prefix, op.key),
+                           op.value);
+            if (r < 0) {
+                return r;
+            }
             break;
         }
         }
@@ -365,7 +368,9 @@ int MemDB::_merge(const std::string &prefix,
             break;
         }
     }
-    cxxlab_assert(mop);
+    if (!mop) {
+        return -EINVAL;
+    }
 
     std::string rdata = bl.to_str();
     auto it = db_.find(full_key);

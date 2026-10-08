@@ -9,6 +9,7 @@
 #include <cstddef>
 #include <cstring>
 #include <deque>
+#include <iostream>
 #include <set>
 #include <sstream>
 #include <string>
@@ -56,13 +57,20 @@ public:
                      MergeOperationOutput *merge_out) const override {
         auto key_str = merge_in.key.ToString();
         auto null_pos = key_str.find('\0');
-        if (null_pos == std::string::npos)
-            return true;
+        if (null_pos == std::string::npos) {
+            std::cerr << "RocksDBMergeAdapter::FullMergeV2: malformed key "
+                      << "(no null separator), key_size=" << key_str.size()
+                      << std::endl;
+            return false;
+        }
         std::string prefix = key_str.substr(0, null_pos);
 
         auto mop = find_op(prefix);
-        if (!mop)
-            return true;
+        if (!mop) {
+            std::cerr << "RocksDBMergeAdapter::FullMergeV2: no merge operator "
+                      << "registered for prefix '" << prefix << "'" << std::endl;
+            return false;
+        }
 
         const ::rocksdb::Slice *existing = merge_in.existing_value;
         const auto &operands = merge_in.operand_list;
@@ -73,27 +81,23 @@ public:
         if (!existing) {
             mop->merge_nonexistent(operands[0].data(), operands[0].size(),
                                    &merge_out->new_value);
-            mop->_record_merge(operands[0].size());
             for (size_t i = 1; i < operands.size(); i++) {
                 std::string tmp;
                 mop->merge(merge_out->new_value.data(),
                            merge_out->new_value.size(),
                            operands[i].data(), operands[i].size(), &tmp);
                 merge_out->new_value = std::move(tmp);
-                mop->_record_merge(operands[i].size());
             }
         } else {
             mop->merge(existing->data(), existing->size(),
                        operands[0].data(), operands[0].size(),
                        &merge_out->new_value);
-            mop->_record_merge(existing->size() + operands[0].size());
             for (size_t i = 1; i < operands.size(); i++) {
                 std::string tmp;
                 mop->merge(merge_out->new_value.data(),
                            merge_out->new_value.size(),
                            operands[i].data(), operands[i].size(), &tmp);
                 merge_out->new_value = std::move(tmp);
-                mop->_record_merge(operands[i].size());
             }
         }
         return true;
@@ -175,7 +179,9 @@ struct RocksDBStore::RDBTransactionImpl : public TransactionImpl {
         ropts.iterate_lower_bound = &lb;
         ropts.iterate_upper_bound = &ub;
         auto it = std::unique_ptr<::rocksdb::Iterator>(db->NewIterator(ropts));
-        for (it->SeekToFirst(); it->Valid() && (--cnt) != 0; it->Next()) {
+        for (it->Seek(start);
+             it->Valid() && it->key().compare(end) < 0 && (--cnt) != 0;
+             it->Next()) {
             batch.Delete(it->key());
         }
         if (cnt == 0) {
@@ -504,7 +510,14 @@ int RocksDBStore::submit_transaction(Transaction t) {
     auto rdb_t = std::static_pointer_cast<RDBTransactionImpl>(t);
     auto s = db_->Write(::rocksdb::WriteOptions(), &rdb_t->batch);
     if (perf_) perf_->inc(l_kv_submit_count);
-    return s.ok() ? 0 : -EIO;
+    if (!s.ok()) {
+        std::cerr << "RocksDBStore::submit_transaction failed: "
+                  << s.ToString() << ", code=" << static_cast<int>(s.code())
+                  << ", batch_size=" << rdb_t->batch.GetDataSize()
+                  << ", batch_count=" << rdb_t->batch.Count() << std::endl;
+        return -EIO;
+    }
+    return 0;
 }
 
 int RocksDBStore::submit_transaction_sync(Transaction t) {
@@ -514,7 +527,14 @@ int RocksDBStore::submit_transaction_sync(Transaction t) {
     wopts.sync = true;
     auto s = db_->Write(wopts, &rdb_t->batch);
     if (perf_) perf_->inc(l_kv_submit_count);
-    return s.ok() ? 0 : -EIO;
+    if (!s.ok()) {
+        std::cerr << "RocksDBStore::submit_transaction_sync failed: "
+                  << s.ToString() << ", code=" << static_cast<int>(s.code())
+                  << ", batch_size=" << rdb_t->batch.GetDataSize()
+                  << ", batch_count=" << rdb_t->batch.Count() << std::endl;
+        return -EIO;
+    }
+    return 0;
 }
 
 int RocksDBStore::set_merge_operator(

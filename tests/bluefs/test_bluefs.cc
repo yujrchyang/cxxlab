@@ -70,23 +70,25 @@ TEST_F(BlueFSTest, WriteAndReadSuper) {
     cfg.alloc_size = 4096;
     cfg.shared_alloc_size = 65536;
 
-    BlueFS fs(cfg);
-    ASSERT_NO_FATAL_FAILURE(fs.add_block_device(BlueFS::BDEV_DB, tmp_path_));
+    {
+        BlueFS fs(cfg);
+        ASSERT_NO_FATAL_FAILURE(fs.add_block_device(BlueFS::BDEV_DB, tmp_path_));
 
-    // Initially the superblock is garbage — _open_super should fail
-    int r = fs._open_super();
-    EXPECT_NE(r, 0);
+        // Initially the superblock is garbage — _open_super should fail
+        int r = fs._open_super();
+        EXPECT_NE(r, 0);
 
-    // Set UUID before write
-    fs.get_mutable_super().uuid.generate();
-    // _write_super auto-increments: starting from 0 → written version = 1
-    ASSERT_EQ(fs._write_super(BlueFS::BDEV_DB), 0);
+        // Set UUID before write
+        fs.get_mutable_super().uuid.generate();
+        // _write_super auto-increments: starting from 0 → written version = 1
+        ASSERT_EQ(fs._write_super(BlueFS::BDEV_DB), 0);
+    }
 
     // Now read back via a new BlueFS instance
     BlueFS fs2(cfg);
     ASSERT_NO_FATAL_FAILURE(fs2.add_block_device(BlueFS::BDEV_DB, tmp_path_));
 
-    r = fs2._open_super();
+    int r = fs2._open_super();
     ASSERT_EQ(r, 0);
 
     EXPECT_EQ(fs2.get_super().version, 1);
@@ -110,14 +112,16 @@ TEST_F(BlueFSTest, SuperVersionIncrement) {
     }
 
     // Read back — should be version 1
-    BlueFS fs2(cfg);
-    ASSERT_NO_FATAL_FAILURE(fs2.add_block_device(BlueFS::BDEV_DB, tmp_path_));
-    ASSERT_EQ(fs2._open_super(), 0);
-    EXPECT_EQ(fs2.get_super().version, 1);
-    EXPECT_FALSE(fs2.get_super().uuid.is_zero());
+    {
+        BlueFS fs2(cfg);
+        ASSERT_NO_FATAL_FAILURE(fs2.add_block_device(BlueFS::BDEV_DB, tmp_path_));
+        ASSERT_EQ(fs2._open_super(), 0);
+        EXPECT_EQ(fs2.get_super().version, 1);
+        EXPECT_FALSE(fs2.get_super().uuid.is_zero());
 
-    // Write again — should bump to 2
-    ASSERT_EQ(fs2._write_super(BlueFS::BDEV_DB), 0);
+        // Write again — should bump to 2
+        ASSERT_EQ(fs2._write_super(BlueFS::BDEV_DB), 0);
+    }
 
     BlueFS fs3(cfg);
     ASSERT_NO_FATAL_FAILURE(fs3.add_block_device(BlueFS::BDEV_DB, tmp_path_));
@@ -522,7 +526,7 @@ TEST_F(BlueFSTest, FileCreateAndStat) {
     uint64_t mtime = 0;
     EXPECT_EQ(fs.stat("mydir", "testfile.txt", &size, &mtime), 0);
     EXPECT_EQ(size, 0ULL);
-    EXPECT_EQ(mtime, 0ULL);
+    EXPECT_GT(mtime, 0ULL);  // mtime should be set to current time
 
     ASSERT_EQ(fs.close_writer(w), 0);
 
@@ -2726,4 +2730,83 @@ TEST_F(BlueFSTest, PerfCountersDump) {
     EXPECT_NE(out.find("num_files"), std::string::npos);
 
     fs.umount();
+}
+
+TEST_F(BlueFSTest, UnlinkReplayFreesVselectorAccounting) {
+    BlueFSConfig cfg;
+    cfg.alloc_size = 4096;
+    cfg.buffered_io = true;
+
+    {
+        BlueFS fs(cfg);
+        ASSERT_NO_FATAL_FAILURE(fs.add_block_device(BlueFS::BDEV_DB, tmp_path_));
+        ASSERT_EQ(fs.mkfs(cfg.alloc_size), 0);
+        ASSERT_EQ(fs.mount(), 0);
+        ASSERT_EQ(fs.mkdir("d"), 0);
+
+        uint64_t free_before = fs.get_free(BlueFS::BDEV_DB);
+
+        BlueFS::FileWriter *w = nullptr;
+        ASSERT_EQ(fs.open_for_write("d", "f", &w), 0);
+        std::string data(65536, 'X');
+        ASSERT_EQ(fs.append_try_flush(w, data.data(), data.size()), 0);
+        ASSERT_EQ(fs.fsync(w), 0);
+        fs.close_writer(w);
+
+        uint64_t free_after_write = fs.get_free(BlueFS::BDEV_DB);
+        EXPECT_LT(free_after_write, free_before);
+
+        ASSERT_EQ(fs.unlink("d", "f"), 0);
+        fs.umount();
+    }
+
+    {
+        BlueFS fs(cfg);
+        ASSERT_NO_FATAL_FAILURE(fs.add_block_device(BlueFS::BDEV_DB, tmp_path_));
+        ASSERT_EQ(fs.mount(), 0);
+        EXPECT_EQ(fs.stat("d", "f", nullptr), -ENOENT);
+
+        uint64_t free_after_replay = fs.get_free(BlueFS::BDEV_DB);
+        uint64_t total = fs.get_total(BlueFS::BDEV_DB);
+        uint64_t log_overhead = total / 2;
+        EXPECT_GT(free_after_replay, total - log_overhead - 65536);
+        fs.umount();
+    }
+}
+
+TEST_F(BlueFSTest, FileUpdateIncVselectorAccounting) {
+    BlueFSConfig cfg;
+    cfg.alloc_size = 4096;
+    cfg.buffered_io = true;
+
+    uint64_t free_after_first_mount = 0;
+    {
+        BlueFS fs(cfg);
+        ASSERT_NO_FATAL_FAILURE(fs.add_block_device(BlueFS::BDEV_DB, tmp_path_));
+        ASSERT_EQ(fs.mkfs(cfg.alloc_size), 0);
+        ASSERT_EQ(fs.mount(), 0);
+        ASSERT_EQ(fs.mkdir("d"), 0);
+
+        BlueFS::FileWriter *w = nullptr;
+        ASSERT_EQ(fs.open_for_write("d", "f", &w), 0);
+        std::string chunk(4096, 'Y');
+        for (int i = 0; i < 8; ++i) {
+            ASSERT_EQ(fs.append_try_flush(w, chunk.data(), chunk.size()), 0);
+            ASSERT_EQ(fs.fsync(w), 0);
+        }
+        fs.close_writer(w);
+
+        free_after_first_mount = fs.get_free(BlueFS::BDEV_DB);
+        fs.umount();
+    }
+
+    {
+        BlueFS fs(cfg);
+        ASSERT_NO_FATAL_FAILURE(fs.add_block_device(BlueFS::BDEV_DB, tmp_path_));
+        ASSERT_EQ(fs.mount(), 0);
+
+        uint64_t free_after_replay = fs.get_free(BlueFS::BDEV_DB);
+        EXPECT_EQ(free_after_replay, free_after_first_mount);
+        fs.umount();
+    }
 }

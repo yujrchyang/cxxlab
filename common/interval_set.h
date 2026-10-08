@@ -43,9 +43,11 @@ public:
 
     void insert(T off, T len) {
         if (len == 0) return;
+        T old_len = 0;
         auto it = m_.lower_bound(off);
         while (it != m_.end() && it->first <= off + len) {
             len = std::max(len, it->first + it->second - off);
+            old_len += it->second;
             it = m_.erase(it);
         }
         if (it != m_.begin()) {
@@ -55,37 +57,47 @@ public:
                 T new_end = std::max(off + len, prev->first + prev->second);
                 len = new_end - prev->first;
                 off = prev->first;
+                old_len += prev->second;
                 m_.erase(prev);
             }
         }
         m_[off] = len;
-        _recalc_size();
+        _size += len - old_len;
     }
 
     void erase(T off, T len) {
         if (len == 0) return;
+        T old_len = 0;
+        T new_len = 0;
         auto it = m_.lower_bound(off);
         if (it != m_.begin()) {
             auto prev = it;
             --prev;
             if (prev->first + prev->second > off) {
+                old_len += prev->second;
                 // lower_bound 语义保证 prev->first < off，无需额外检查
                 auto old_end = prev->second;
                 prev->second = off - prev->first;
+                new_len += prev->second;
                 if (off + len < prev->first + old_end) {
-                    m_[off + len] = (prev->first + old_end) - (off + len);
+                    T right_len = (prev->first + old_end) - (off + len);
+                    m_[off + len] = right_len;
+                    new_len += right_len;
                 }
             }
         }
         T end = off + len;
         while (it != m_.end() && it->first < end) {
             T it_end = it->first + it->second;
+            old_len += it->second;
             if (it_end > end) {
-                m_[end] = it_end - end;
+                T right_len = it_end - end;
+                m_[end] = right_len;
+                new_len += right_len;
             }
             it = m_.erase(it);
         }
-        _recalc_size();
+        _size += new_len - old_len;
     }
 
     void clear() {

@@ -105,14 +105,14 @@ struct TransContext {
     TransContext(const TransContext &) = delete;
     TransContext &operator=(const TransContext &) = delete;
 
-    void set_state(state_t s) { state_ = s; }
-    state_t get_state() const { return state_; }
+    void set_state(state_t s) { state_.store(s, std::memory_order_relaxed); }
+    state_t get_state() const { return state_.load(std::memory_order_relaxed); }
 
     void write_onode(OnodeRef &o) { onodes.insert(o); }
     void note_removed_object(OnodeRef &o) { onodes.erase(o); }
 
 private:
-    state_t state_ = STATE_PREPARE;
+    std::atomic<state_t> state_ = STATE_PREPARE;
 };
 
 class OpSequencer {
@@ -324,6 +324,7 @@ struct WriteContext {
             : logical_offset(loffs), b(blob), blob_length(blen), b_off(o), bl(data), b_off0(o0), length0(len0), new_blob(nb), mark_unused(mu) {}
     };
 
+    bool buffered = true;  ///< buffered write (false = NOCACHE)
     unsigned csum_order = 0;
     uint64_t target_blob_size = 0;
 
